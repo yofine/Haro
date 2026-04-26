@@ -1,9 +1,9 @@
 # Haro
 
 Turn your browser into an AI browser.
-<img width="1918" height="931" alt="ScreenShot_2026-04-27_010508_090" src="https://github.com/user-attachments/assets/56f18f58-0e58-40ec-952d-e92e8905e8ed" />
-
 Haro is a Chrome MV3 extension that adds a quiet, page-aware AI layer to the browser. It includes a sidebar-first experience, local model provider settings, a low-profile `window.browserAgent` gateway, site permissions, memory, skills, and call observability.
+
+<img width="1918" height="931" alt="ScreenShot_2026-04-27_010508_090" src="https://github.com/user-attachments/assets/56f18f58-0e58-40ec-952d-e92e8905e8ed" />
 
 ## Stack
 
