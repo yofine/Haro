@@ -3,6 +3,7 @@ import type {
   BrowserAgentResponse,
   ChatPayload,
   GatewayMethod,
+  LocalChatPayload,
   RunPayload
 } from "../shared/types";
 
@@ -15,6 +16,11 @@ declare global {
       run(payload: RunPayload): Promise<BrowserAgentResponse>;
       models: {
         list(): Promise<BrowserAgentResponse>;
+      };
+      local: {
+        status(): Promise<BrowserAgentResponse>;
+        classify(payload: { text: string }): Promise<BrowserAgentResponse>;
+        chat(payload: LocalChatPayload): Promise<BrowserAgentResponse>;
       };
     };
   }
@@ -42,5 +48,10 @@ window.browserAgent = Object.freeze({
   run: (payload: RunPayload) => request("run", payload),
   models: Object.freeze({
     list: () => request("models.list")
+  }),
+  local: Object.freeze({
+    status: () => request("local.status"),
+    classify: (payload: { text: string }) => request("local.classify", payload),
+    chat: (payload: LocalChatPayload) => request("local.chat", payload)
   })
 });

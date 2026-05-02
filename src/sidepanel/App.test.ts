@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildSidebarRunMessage, detectDirectBenchmarkRequest, detectSkillInstallUrl, filterComposerSkills, formatAgentEventsForTimeline, formatAgentRunResultForTimeline, formatBenchmarkToolResultForTimeline, getSiteConversationStorageKey, moveSkillPickerIndex, normalizeRuntimeMessageError, parseMessageBlocks, sanitizeTimelineItemsForStorage, timelineItemsToConversationMemory, userMessageMeta } from "./App";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { buildSidebarRunMessage, detectDirectBenchmarkRequest, detectSkillInstallUrl, filterComposerSkills, filterStoredConversationPages, formatAgentEventsForTimeline, formatAgentRunResultForTimeline, formatBenchmarkToolResultForTimeline, getSiteConversationStorageKey, isConnectedToActivePage, isScrolledNearBottom, MarkdownText, moveSkillPickerIndex, normalizeRuntimeMessageError, parseMessageBlocks, sanitizeTimelineItemsForStorage, storedConversationPageToObservation, timelineItemsToConversationMemory, upsertStoredConversationPage, userMessageMeta } from "./App";
 import type { AgentEvent } from "../shared/types";
 
 describe("formatAgentEventsForTimeline", () => {
@@ -94,6 +96,27 @@ describe("formatAgentEventsForTimeline", () => {
         title: "Full-page screenshot",
         image: expect.objectContaining({ filename: "page.png" })
       })
+    ]);
+  });
+
+  it("labels browser tool actions in trace output", () => {
+    const events: AgentEvent[] = [
+      { type: "action", action: { type: "tool", toolId: "page.read", input: { mode: "semanticOutline" } }, reason: "Run browser tool page.read" },
+      {
+        type: "action-result",
+        action: { type: "tool", toolId: "page.read", input: { mode: "semanticOutline" } },
+        result: { ok: true, status: "success", message: "Read page" }
+      },
+      { type: "final", text: "Done." }
+    ];
+
+    expect(formatAgentRunResultForTimeline({ finalText: "Done.", events }, "Final")).toEqual([
+      expect.objectContaining({
+        kind: "result",
+        title: "Activity",
+        detail: "Run page.read · Tool completed"
+      }),
+      expect.objectContaining({ kind: "final", detail: "Done." })
     ]);
   });
 
@@ -195,6 +218,76 @@ describe("moveSkillPickerIndex", () => {
     expect(moveSkillPickerIndex(0, "up", 3)).toBe(2);
     expect(moveSkillPickerIndex(1, "up", 3)).toBe(0);
     expect(moveSkillPickerIndex(0, "down", 0)).toBe(-1);
+  });
+});
+
+describe("isScrolledNearBottom", () => {
+  it("treats small bottom gaps as still following the conversation", () => {
+    expect(isScrolledNearBottom({ scrollHeight: 1000, scrollTop: 552, clientHeight: 400 })).toBe(true);
+    expect(isScrolledNearBottom({ scrollHeight: 1000, scrollTop: 500, clientHeight: 400 })).toBe(false);
+  });
+});
+
+describe("isConnectedToActivePage", () => {
+  it("detects when Haro is still connected to a previous active tab", () => {
+    expect(isConnectedToActivePage(
+      { tabId: 10, url: "https://old.example/a" },
+      { tabId: 11, origin: "https://new.example", url: "https://new.example/a" }
+    )).toBe(false);
+    expect(isConnectedToActivePage(
+      { tabId: 10, url: "https://example.com/a" },
+      { tabId: 10, origin: "https://example.com", url: "https://example.com/a" }
+    )).toBe(true);
+    expect(isConnectedToActivePage(null, { tabId: 10, origin: "https://example.com", url: "https://example.com/a" })).toBe(true);
+  });
+
+  it("treats same-origin path changes as a different connected page", () => {
+    expect(isConnectedToActivePage(
+      { tabId: 10, url: "https://example.com/docs/a?tab=1" },
+      { tabId: 10, origin: "https://example.com", url: "https://example.com/docs/b?tab=1" }
+    )).toBe(false);
+  });
+});
+
+describe("stored conversation page helpers", () => {
+  it("filters stored conversation pages by title or full URL", () => {
+    const pages = [
+      { title: "Docs", url: "https://example.com/docs/a", origin: "https://example.com", updatedAt: "2026-05-03T00:00:00.000Z" },
+      { title: "Inbox", url: "https://mail.example.com/u/0", origin: "https://mail.example.com", updatedAt: "2026-05-03T00:00:01.000Z" }
+    ];
+
+    expect(filterStoredConversationPages(pages, "docs").map((page) => page.url)).toEqual(["https://example.com/docs/a"]);
+    expect(filterStoredConversationPages(pages, "u/0").map((page) => page.url)).toEqual(["https://mail.example.com/u/0"]);
+    expect(filterStoredConversationPages(pages, "")).toEqual(pages);
+  });
+
+  it("upserts stored conversation pages by full URL and sorts by update time", () => {
+    const pages = upsertStoredConversationPage(
+      [{ title: "Old", url: "https://example.com/a", origin: "https://example.com", updatedAt: "2026-05-03T00:00:00.000Z" }],
+      { title: "New", url: "https://example.com/a", origin: "https://example.com" },
+      "2026-05-03T00:00:02.000Z"
+    );
+
+    expect(pages).toEqual([
+      { title: "New", url: "https://example.com/a", origin: "https://example.com", updatedAt: "2026-05-03T00:00:02.000Z" }
+    ]);
+  });
+
+  it("creates a readable page shell when selecting stored conversation history", () => {
+    expect(storedConversationPageToObservation({
+      title: "Docs",
+      url: "https://example.com/docs/a",
+      origin: "https://example.com",
+      updatedAt: "2026-05-03T00:00:00.000Z"
+    })).toEqual({
+      title: "Docs",
+      url: "https://example.com/docs/a",
+      origin: "https://example.com",
+      text: "",
+      headings: [],
+      links: [],
+      interactiveElements: []
+    });
   });
 });
 
@@ -304,6 +397,41 @@ describe("parseMessageBlocks", () => {
   });
 });
 
+describe("MarkdownText", () => {
+  it("renders common assistant markdown without leaking syntax markers", () => {
+    const html = renderToStaticMarkup(createElement(
+      MarkdownText,
+      { content: [
+        "## Overview",
+        "This is a wrapped",
+        "paragraph with a [source](https://example.com) and *emphasis*.",
+        "",
+        "> Important note",
+        "",
+        "- **First:** useful detail",
+        "  continued detail",
+        "- Second item",
+        "",
+        "---",
+        "",
+        "1. Step one",
+        "2. Step two"
+      ].join("\n") }
+    ));
+
+    expect(html).toContain("md-heading h2");
+    expect(html).toContain('href="https://example.com"');
+    expect(html).toContain("<em>emphasis</em>");
+    expect(html).toContain("md-blockquote");
+    expect(html).toContain("<strong>First:</strong>");
+    expect(html).toContain("continued detail");
+    expect(html).toContain("md-rule");
+    expect(html).toContain("<ol");
+    expect(html).not.toContain("&gt; Important note");
+    expect(html).not.toContain("[source]");
+  });
+});
+
 describe("normalizeRuntimeMessageError", () => {
   it("turns missing receiver errors into an actionable message", () => {
     expect(normalizeRuntimeMessageError(new Error("Could not establish connection. Receiving end does not exist.")))
@@ -314,8 +442,8 @@ describe("normalizeRuntimeMessageError", () => {
 });
 
 describe("site conversation persistence helpers", () => {
-  it("uses origin-scoped storage keys", () => {
-    expect(getSiteConversationStorageKey("https://example.com")).toBe("agenticify:sidepanel:conversation:https://example.com");
+  it("uses full-page URL storage keys", () => {
+    expect(getSiteConversationStorageKey("https://example.com/docs/a?tab=1")).toBe("agenticify:sidepanel:conversation:https://example.com/docs/a?tab=1");
   });
 
   it("keeps recent text timeline items and drops heavy screenshots", () => {

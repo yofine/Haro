@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DomObservation, ModelGateway } from "../shared/types";
 import { classifyTaskIntent, runAgentTask, runMemoryChat, runPageChat } from "./runtime";
+import { builtInSkills } from "./skills";
 
 function observation(overrides: Partial<DomObservation> = {}): DomObservation {
   return {
@@ -170,6 +171,52 @@ describe("Agent runtime", () => {
     expect(result.finalText).toBe("Starter costs $9.");
   });
 
+  it("uses reason text when the model returns final as a boolean", async () => {
+    const modelGateway = gateway(JSON.stringify({
+      final: true,
+      reason: "页面标记已完成。",
+      confidence: 1
+    }));
+
+    const result = await runAgentTask({
+      task: "Mark this page",
+      observe: async () => observation(),
+      modelGateway,
+      maxSteps: 3
+    });
+
+    expect(result.finalText).toBe("页面标记已完成。");
+    expect(result.events.at(-1)).toEqual({ type: "final", text: "页面标记已完成。" });
+  });
+
+  it("renders object final answers as readable markdown instead of protocol JSON", async () => {
+    const modelGateway = gateway(JSON.stringify({
+      final: {
+        summary: "Agenticify turns the browser into an AI console.",
+        keyPoints: [
+          { title: "Current task", content: "Upgrade the side panel." },
+          { title: "Risk", content: "Avoid exposing internal prompt details." }
+        ]
+      },
+      reason: "The page is about the project status.",
+      confidence: 0.92
+    }));
+
+    const result = await runAgentTask({
+      task: "总结",
+      observe: async () => observation({ title: "Agenticify" }),
+      modelGateway,
+      maxSteps: 3
+    });
+
+    expect(result.finalText).toContain("### Summary");
+    expect(result.finalText).toContain("Agenticify turns the browser into an AI console.");
+    expect(result.finalText).toContain("### Key Points");
+    expect(result.finalText).toContain("### Title");
+    expect(result.finalText).not.toContain("\"final\"");
+    expect(result.events.at(-1)).toEqual({ type: "final", text: result.finalText });
+  });
+
   it("executes a DOM click when the model requests it", async () => {
     const act = vi.fn().mockResolvedValue({ ok: true, status: "success", message: "Clicked #details" });
     const modelGateway = gateway(
@@ -214,11 +261,6 @@ describe("Agent runtime", () => {
         action: { type: "skill", skillId: "builtin/page-report" },
         reason: "Use the built-in report skill.",
         confidence: 0.9
-      }),
-      JSON.stringify({
-        final: "Report generated.",
-        reason: "The skill completed.",
-        confidence: 0.9
       })
     );
 
@@ -241,7 +283,8 @@ describe("Agent runtime", () => {
       expect.objectContaining({ role: "system", content: expect.stringContaining("Available installed skills") })
     ]));
     expect(act).toHaveBeenCalledWith({ type: "skill", skillId: "builtin/page-report" });
-    expect(result.finalText).toBe("Report generated.");
+    expect(modelGateway.chat).toHaveBeenCalledTimes(1);
+    expect(result.finalText).toBe("Skill builtin/page-report completed");
   });
 
   it("injects explicitly selected skills even when the task text does not match them", async () => {
@@ -290,6 +333,44 @@ describe("Agent runtime", () => {
     ]));
   });
 
+  it("directly executes a clearly requested built-in browser skill without asking the model to decide", async () => {
+    const act = vi.fn().mockResolvedValue({ ok: true, status: "success", message: "Skill builtin/immersive-translate completed: Page script" });
+    const modelGateway = gateway(JSON.stringify({ final: "Should not be used." }));
+
+    const result = await runAgentTask({
+      task: "执行沉浸式翻译",
+      observe: async () => observation(),
+      act,
+      modelGateway,
+      skills: builtInSkills
+    });
+
+    expect(modelGateway.chat).not.toHaveBeenCalled();
+    expect(act).toHaveBeenCalledWith({ type: "skill", skillId: "builtin/immersive-translate" });
+    expect(result.finalText).toBe("Skill builtin/immersive-translate completed: Page script");
+  });
+
+  it("normalizes malformed skill action strings from model responses", async () => {
+    const act = vi.fn().mockResolvedValue({ ok: true, status: "success", message: "Skill builtin/immersive-translate completed: Page script" });
+    const modelGateway = gateway(JSON.stringify({
+      action: "skill by skillId/immersive-translate",
+      reason: "用户请求执行沉浸式翻译。",
+      confidence: 0.8
+    }));
+
+    const result = await runAgentTask({
+      task: "帮我做双语阅读",
+      observe: async () => observation(),
+      act,
+      modelGateway,
+      skills: builtInSkills
+    });
+
+    expect(act).toHaveBeenCalledWith({ type: "skill", skillId: "builtin/immersive-translate" });
+    expect(modelGateway.chat).toHaveBeenCalledTimes(1);
+    expect(result.finalText).toBe("Skill builtin/immersive-translate completed: Page script");
+  });
+
   it("honors maxSteps with a hard cap of five", async () => {
     const act = vi.fn().mockResolvedValue({ ok: true, status: "success", message: "Scrolled down" });
     const modelGateway = gateway(
@@ -330,6 +411,56 @@ describe("Agent runtime", () => {
 
     expect(result.finalText).toBe("No element found for #missing");
     expect(result.events.map((event) => event.type)).toEqual(["observe", "thought", "action", "action-result", "blocked"]);
+  });
+
+  it("merges nested browser tool events returned by skill actions", async () => {
+    const modelGateway = gateway(
+      JSON.stringify({
+        action: { type: "skill", skillId: "builtin/screenshot" },
+        reason: "Capture the current page.",
+        confidence: 0.8
+      }),
+      JSON.stringify({
+        final: "Screenshot captured.",
+        reason: "The browser tool completed.",
+        confidence: 0.9
+      })
+    );
+
+    const result = await runAgentTask({
+      task: "Take a full page screenshot",
+      observe: async () => observation(),
+      act: vi.fn().mockResolvedValue({
+        ok: true,
+        status: "success",
+        message: "Skill completed",
+        events: [
+          {
+            type: "action",
+            action: { type: "tool", toolId: "page.capture", input: { target: "fullPage" } },
+            reason: "Run browser tool page.capture"
+          },
+          {
+            type: "action-result",
+            action: { type: "tool", toolId: "page.capture", input: { target: "fullPage" } },
+            result: { ok: true, status: "success", message: "Captured full page" }
+          }
+        ]
+      }),
+      modelGateway
+    });
+
+    expect(result.events.map((event) => event.type)).toEqual([
+      "observe",
+      "thought",
+      "action",
+      "action-result",
+      "action",
+      "action-result",
+      "final"
+    ]);
+    expect(result.events[4]).toMatchObject({ type: "action", action: { type: "tool", toolId: "page.capture" } });
+    expect(result.finalText).toBe("Skill completed");
   });
 
   it("blocks high-risk actions before calling DOM tools", async () => {

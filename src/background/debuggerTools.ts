@@ -2,7 +2,9 @@ import type {
   DebuggerAction,
   DebuggerActionResult,
   DebuggerSnapshot,
+  ArticleParagraph,
   FormFillField,
+  PageScriptResult,
   PageTextReplacement
 } from "../shared/types";
 
@@ -263,6 +265,25 @@ export class DebuggerTools {
     `);
   }
 
+  async collectArticleParagraphs(limit = 80): Promise<ArticleParagraph[]> {
+    return this.evaluate<ArticleParagraph[]>(`
+      (() => {
+        const root = document.querySelector('article,main,[role="main"]') || document.body || document.documentElement;
+        const language = navigator.language || document.documentElement.lang || '';
+        const nodes = Array.from(root.querySelectorAll('p,li,blockquote')).filter((element) => {
+          const text = (element.textContent || '').replace(/\\s+/g, ' ').trim();
+          const rect = element.getBoundingClientRect();
+          return text.length >= 40 && rect.width > 120 && rect.height > 8;
+        }).slice(0, ${JSON.stringify(Math.max(1, Math.min(limit, 160)))});
+        return nodes.map((element, index) => {
+          const agenticifyParagraphIndex = String(index);
+          element.setAttribute('data-agenticify-paragraph-index', agenticifyParagraphIndex);
+          return { index, text: (element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 1800), language };
+        });
+      })()
+    `);
+  }
+
   async rewriteTextNodes(sessionId: string, replacements: PageTextReplacement[]): Promise<DebuggerActionResult> {
     const safeReplacements = replacements.filter((replacement) => replacement.replacement !== replacement.original);
     await this.evaluate(`
@@ -356,6 +377,51 @@ export class DebuggerTools {
         filled: typeof result?.filled === "number" ? result.filled : fields.length,
         skipped: Array.isArray(result?.skipped) ? result.skipped : []
       }
+    };
+  }
+
+  async runPageScript(script: { language: "js" | "css"; code: string; scriptId?: string; data?: unknown }): Promise<DebuggerActionResult> {
+    const scriptId = script.scriptId || `${script.language}-script`;
+    if (script.language === "css") {
+      const result = await this.evaluate<PageScriptResult>(`
+        (() => {
+          const scriptId = ${JSON.stringify(scriptId)};
+          const code = ${JSON.stringify(script.code)};
+          const id = "agenticify-skill-script-" + scriptId.replace(/[^a-z0-9_-]+/gi, "-");
+          let style = document.getElementById(id);
+          if (!style) {
+            style = document.createElement("style");
+            style.id = id;
+            style.setAttribute("data-agenticify-skill-script", scriptId);
+            document.documentElement.appendChild(style);
+          }
+          style.textContent = code;
+          return { language: "css", scriptId, changed: 1 };
+        })()
+      `);
+      return {
+        ok: true,
+        message: "Injected CSS script.",
+        script: result && result.language === "css" ? result : { language: "css", scriptId, changed: 1 }
+      };
+    }
+
+    const result = await this.evaluate<unknown>(`
+      (() => {
+        "use strict";
+        const scriptId = ${JSON.stringify(scriptId)};
+        const data = ${JSON.stringify(script.data ?? {})};
+        const run = new Function("data", ${JSON.stringify(script.code)});
+        void scriptId;
+        const value = run(data);
+        return { language: "js", scriptId, details: value, changed: value && typeof value.changed === "number" ? value.changed : undefined };
+      })()
+    `);
+    const scriptResult = result as PageScriptResult | undefined;
+    return {
+      ok: true,
+      message: "Ran JS script.",
+      script: scriptResult && scriptResult.language === "js" ? scriptResult : { language: "js", scriptId, details: result }
     };
   }
 

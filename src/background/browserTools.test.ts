@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ModelGateway } from "../shared/types";
-import { runBenchmarkTool, sanitizeReportHtml } from "./browserTools";
+import { runBenchmarkTool, runBrowserToolPlan, sanitizeReportHtml } from "./browserTools";
 
 function model(text: string): ModelGateway {
   return {
@@ -36,9 +36,11 @@ function tools() {
       }
     }),
     collectTextNodes: vi.fn().mockResolvedValue([{ index: 0, text: "Hello world" }]),
+    collectArticleParagraphs: vi.fn().mockResolvedValue([{ index: 0, text: "Hello world" }]),
     rewriteTextNodes: vi.fn().mockResolvedValue({ ok: true, message: "rewrite", rewrite: { sessionId: "s1", changed: 1, replacements: [] } }),
     restoreRewriteSession: vi.fn().mockResolvedValue({ ok: true, message: "Restored 1 text nodes." }),
-    fillFormFields: vi.fn().mockResolvedValue({ ok: true, message: "fill", formFill: { filled: 1, skipped: [] } })
+    fillFormFields: vi.fn().mockResolvedValue({ ok: true, message: "fill", formFill: { filled: 1, skipped: [] } }),
+    runPageScript: vi.fn().mockResolvedValue({ ok: true, message: "script", script: { language: "js", changed: 1 } })
   };
 }
 
@@ -64,6 +66,73 @@ describe("browser benchmark tools", () => {
 
     expect(result).toMatchObject({ type: "screenshot", screenshot: { filename: "example-screenshot.png" } });
     expect(debuggerTools.captureFullPageScreenshot).toHaveBeenCalledWith("Example");
+  });
+
+  it("exposes the browser tool plan used for legacy compatibility execution", async () => {
+    const onToolPlan = vi.fn();
+
+    await runBenchmarkTool({
+      request: { type: "screenshot" },
+      tools: tools(),
+      modelGateway: model(""),
+      onToolPlan
+    });
+
+    expect(onToolPlan).toHaveBeenCalledWith({
+      source: "legacy-benchmark",
+      benchmarkRequest: { type: "screenshot" },
+      calls: [
+        { toolId: "page.read", input: { mode: "semanticOutline" } },
+        { toolId: "page.capture", input: { target: "fullPage" } }
+      ]
+    });
+  });
+
+  it("forwards browser tool execution events to callers", async () => {
+    const onEvent = vi.fn();
+
+    await runBenchmarkTool({
+      request: { type: "screenshot" },
+      tools: tools(),
+      modelGateway: model(""),
+      onEvent
+    });
+
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "action",
+      action: { type: "tool", toolId: "page.read", input: { mode: "semanticOutline" } }
+    }));
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "action-result",
+      action: { type: "tool", toolId: "page.capture", input: { target: "fullPage" } }
+    }));
+  });
+
+  it("executes browser tool plans directly without legacy benchmark remapping", async () => {
+    const onToolPlan = vi.fn();
+    const debuggerTools = tools();
+
+    const result = await runBrowserToolPlan({
+      plan: {
+        source: "skill",
+        calls: [
+          { toolId: "page.read", input: { mode: "semanticOutline" } },
+          { toolId: "page.capture", input: { target: "fullPage" } }
+        ]
+      },
+      tools: debuggerTools,
+      modelGateway: model(""),
+      onToolPlan
+    });
+
+    expect(result).toMatchObject({ type: "screenshot", screenshot: { filename: "example-screenshot.png" } });
+    expect(onToolPlan).toHaveBeenCalledWith({
+      source: "skill",
+      calls: [
+        { toolId: "page.read", input: { mode: "semanticOutline" } },
+        { toolId: "page.capture", input: { target: "fullPage" } }
+      ]
+    });
   });
 
   it("generates sanitized html reports from debugger snapshots", async () => {

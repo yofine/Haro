@@ -6,16 +6,19 @@ import {
   ensureGatewayAccess,
   getGrantedScopes,
   debuggerAccessScopes,
+  normalizeGatewayError,
   normalizeRequestedScopes,
   resolveApprovedScopes,
   requiredRunScopes
 } from "./gateway";
+import { defaultSettings } from "./storage";
 import type { ExtensionSettings } from "./types";
 
 const baseSettings: ExtensionSettings = {
   locale: "en",
   providers: [],
   gateway: { enabled: true },
+  localModels: defaultSettings.localModels,
   skills: [],
   memories: [],
   permissions: [],
@@ -93,6 +96,13 @@ describe("gateway v1 protocol", () => {
 
     expect(() => ensureGatewayAccess(baseSettings, "https://app.example", ["model.chat"], false))
       .toThrow(expect.objectContaining({ code: "permission_denied" }));
+  });
+
+  it("normalizes local privacy blocks to a stable gateway error code", () => {
+    expect(normalizeGatewayError(new Error("External model call blocked by local privacy policy."))).toMatchObject({
+      code: "privacy_blocked",
+      message: "External model call was blocked by the local privacy policy."
+    });
   });
 
   it("allows authorized origins and exposes only granted gateway status fields", () => {

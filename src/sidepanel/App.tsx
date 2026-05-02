@@ -1,27 +1,27 @@
 import {
   ArrowUp,
   AtSign,
-  Bot,
-  CheckCircle2,
+  Camera,
   ChevronRight,
   Copy,
   Download,
   FileText,
-  ListFilter,
+  History,
+  Languages,
   Loader2,
   Lock,
-  PenLine,
   RefreshCw,
   Settings,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
   Trash2,
-  X,
-  Wand2
+  X
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ReactElement, ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Button } from "../components/ui/button";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
@@ -65,6 +65,22 @@ type MessageBlock =
 type ObservedPage = DomObservation & {
   tabId?: number;
 };
+
+type ActivePageSummary = {
+  tabId?: number;
+  title?: string;
+  url?: string;
+  origin?: string;
+};
+
+type StoredConversationPage = {
+  title?: string;
+  url: string;
+  origin: string;
+  updatedAt: string;
+};
+
+const conversationRegistryKey = "agenticify:sidepanel:conversation-pages";
 
 async function sendRuntimeMessage<T>(message: unknown, copy?: { backgroundDisconnected?: string }): Promise<T> {
   try {
@@ -130,8 +146,8 @@ function copyText(text: string) {
   return Promise.resolve();
 }
 
-export function getSiteConversationStorageKey(origin: string) {
-  return `${conversationStoragePrefix}${origin}`;
+export function getSiteConversationStorageKey(pageUrl: string) {
+  return `${conversationStoragePrefix}${pageUrl}`;
 }
 
 function isTimelineItem(value: unknown): value is TimelineItem {
@@ -159,19 +175,73 @@ export function timelineItemsToConversationMemory(items: TimelineItem[]): Conver
   return { turns: turns.slice(-12) };
 }
 
-async function loadSiteConversation(origin: string): Promise<TimelineItem[]> {
-  const key = getSiteConversationStorageKey(origin);
+async function loadSiteConversation(pageUrl: string): Promise<TimelineItem[]> {
+  const key = getSiteConversationStorageKey(pageUrl);
   const stored = await chrome.storage.local.get(key);
   const value = stored[key];
   return Array.isArray(value) ? sanitizeTimelineItemsForStorage(value.filter(isTimelineItem)) : [];
 }
 
-async function saveSiteConversation(origin: string, items: TimelineItem[]): Promise<void> {
-  await chrome.storage.local.set({ [getSiteConversationStorageKey(origin)]: sanitizeTimelineItemsForStorage(items) });
+async function saveSiteConversation(pageUrl: string, items: TimelineItem[]): Promise<void> {
+  await chrome.storage.local.set({ [getSiteConversationStorageKey(pageUrl)]: sanitizeTimelineItemsForStorage(items) });
 }
 
-async function clearSiteConversation(origin: string): Promise<void> {
-  await chrome.storage.local.remove(getSiteConversationStorageKey(origin));
+async function clearSiteConversation(pageUrl: string): Promise<void> {
+  await chrome.storage.local.remove(getSiteConversationStorageKey(pageUrl));
+}
+
+function isStoredConversationPage(value: unknown): value is StoredConversationPage {
+  if (!value || typeof value !== "object") return false;
+  const page = value as Partial<StoredConversationPage>;
+  return typeof page.url === "string" && typeof page.origin === "string" && typeof page.updatedAt === "string";
+}
+
+export function filterStoredConversationPages(pages: StoredConversationPage[], query: string): StoredConversationPage[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return pages;
+  return pages.filter((page) => `${page.title || ""} ${page.url}`.toLowerCase().includes(normalized));
+}
+
+export function upsertStoredConversationPage(pages: StoredConversationPage[], page: Omit<StoredConversationPage, "updatedAt">, updatedAt: string): StoredConversationPage[] {
+  const next: StoredConversationPage = { ...page, updatedAt };
+  return [
+    next,
+    ...pages.filter((candidate) => candidate.url !== page.url)
+  ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export function storedConversationPageToObservation(page: StoredConversationPage): ObservedPage {
+  return {
+    title: page.title || page.origin,
+    url: page.url,
+    origin: page.origin,
+    text: "",
+    headings: [],
+    links: [],
+    interactiveElements: []
+  };
+}
+
+async function loadStoredConversationPages(): Promise<StoredConversationPage[]> {
+  const stored = await chrome.storage.local.get(conversationRegistryKey);
+  const value = stored[conversationRegistryKey];
+  return Array.isArray(value)
+    ? value.filter(isStoredConversationPage).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    : [];
+}
+
+async function saveStoredConversationPage(page: Omit<StoredConversationPage, "updatedAt">): Promise<StoredConversationPage[]> {
+  const pages = await loadStoredConversationPages();
+  const next = upsertStoredConversationPage(pages, page, new Date().toISOString()).slice(0, 120);
+  await chrome.storage.local.set({ [conversationRegistryKey]: next });
+  return next;
+}
+
+async function removeStoredConversationPage(pageUrl: string): Promise<StoredConversationPage[]> {
+  const pages = await loadStoredConversationPages();
+  const next = pages.filter((page) => page.url !== pageUrl);
+  await chrome.storage.local.set({ [conversationRegistryKey]: next });
+  return next;
 }
 
 function MessageContent({ text }: { text: string }) {
@@ -196,74 +266,33 @@ function MessageContent({ text }: { text: string }) {
   );
 }
 
-function renderInlineMarkdown(text: string) {
-  const nodes: ReactNode[] = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
+export function MarkdownText({ content }: { content: string }) {
+  const components: Components = {
+    p: ({ children }) => <p className="md-paragraph">{children}</p>,
+    h1: ({ children }) => <div className="md-heading h1">{children}</div>,
+    h2: ({ children }) => <div className="md-heading h2">{children}</div>,
+    h3: ({ children }) => <div className="md-heading h3">{children}</div>,
+    h4: ({ children }) => <div className="md-heading h3">{children}</div>,
+    ul: ({ children }) => <ul className="md-list">{children}</ul>,
+    ol: ({ children }) => <ol className="md-list">{children}</ol>,
+    blockquote: ({ children }) => <blockquote className="md-blockquote">{children}</blockquote>,
+    hr: () => <hr className="md-rule" />,
+    a: ({ children, href }) => (
+      <a className="md-link" href={href} target="_blank" rel="noreferrer">
+        {children}
+      </a>
+    ),
+    table: ({ children }) => <div className="md-table-wrap"><table className="md-table">{children}</table></div>,
+    code: ({ children, className }) => <code className={className || "inline-code"}>{children}</code>
+  };
 
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
-    const token = match[0];
-    if (token.startsWith("`")) {
-      nodes.push(<code className="inline-code" key={`${match.index}-code`}>{token.slice(1, -1)}</code>);
-    } else {
-      nodes.push(<strong key={`${match.index}-strong`}>{token.slice(2, -2)}</strong>);
-    }
-    cursor = match.index + token.length;
-  }
-
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return nodes.length ? nodes : text;
-}
-
-function MarkdownText({ content }: { content: string }) {
-  const lines = content.split("\n");
-  const elements: ReactElement[] = [];
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
-    if (heading) {
-      const level = heading[1].length;
-      elements.push(<div className={`md-heading h${level}`} key={index}>{renderInlineMarkdown(heading[2])}</div>);
-      continue;
-    }
-
-    const unordered = /^\s*[-*]\s+(.+)$/.exec(line);
-    if (unordered) {
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = /^\s*[-*]\s+(.+)$/.exec(lines[index]);
-        if (!item) break;
-        items.push(item[1]);
-        index += 1;
-      }
-      index -= 1;
-      elements.push(<ul className="md-list" key={index}>{items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}</ul>);
-      continue;
-    }
-
-    const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
-    if (ordered) {
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = /^\s*\d+[.)]\s+(.+)$/.exec(lines[index]);
-        if (!item) break;
-        items.push(item[1]);
-        index += 1;
-      }
-      index -= 1;
-      elements.push(<ol className="md-list" key={index}>{items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}</ol>);
-      continue;
-    }
-
-    if (line.trim()) {
-      elements.push(<p className="md-paragraph" key={index}>{renderInlineMarkdown(line)}</p>);
-    }
-  }
-
-  return <div className="message-text">{elements}</div>;
+  return (
+    <div className="message-text">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function TraceContent({ detail }: { detail: string }) {
@@ -286,6 +315,7 @@ function describeAction(action: AgentAction) {
   if (action.type === "scroll") return `Scroll ${action.direction}`;
   if (action.type === "debugger") return "Request debugger";
   if (action.type === "skill") return `Use skill ${action.skillId}`;
+  if (action.type === "tool") return `Run ${action.toolId}`;
   return "Read page";
 }
 
@@ -420,6 +450,14 @@ export function formatBenchmarkToolResultForTimeline(result: BenchmarkToolResult
       meta: "TRACE"
     };
   }
+  if (result.type === "script") {
+    return {
+      kind: "result",
+      title: "Activity",
+      detail: `Tool completed · Ran ${result.script.language.toUpperCase()} script${result.script.changed === undefined ? "" : ` · Changed ${result.script.changed}`}`,
+      meta: "TRACE"
+    };
+  }
   return {
     kind: "result",
     title: "Activity",
@@ -529,8 +567,21 @@ export function moveSkillPickerIndex(current: number, direction: "up" | "down", 
   return current < 0 ? itemCount - 1 : (current - 1 + itemCount) % itemCount;
 }
 
+export function isScrolledNearBottom(element: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">, threshold = 48): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+export function isConnectedToActivePage(page: Pick<ObservedPage, "tabId" | "url"> | null, activePage: ActivePageSummary | null): boolean {
+  if (!page || !activePage?.tabId || !activePage.url) return true;
+  return page.tabId === activePage.tabId && page.url === activePage.url;
+}
+
 export function App() {
   const [page, setPage] = useState<ObservedPage | null>(null);
+  const [activePage, setActivePage] = useState<ActivePageSummary | null>(null);
+  const [storedPages, setStoredPages] = useState<StoredConversationPage[]>([]);
+  const [storedPageSearch, setStoredPageSearch] = useState("");
+  const [showStoredPages, setShowStoredPages] = useState(false);
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
   const [composerSkills, setComposerSkills] = useState<InstalledSkill[]>([]);
   const [input, setInput] = useState("");
@@ -546,9 +597,13 @@ export function App() {
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const [lastRewriteSessionId, setLastRewriteSessionId] = useState("");
   const [items, setItems] = useState<TimelineItem[]>([]);
-  const [conversationOrigin, setConversationOrigin] = useState("");
+  const [conversationPageUrl, setConversationPageUrl] = useState("");
   const [conversationLoaded, setConversationLoaded] = useState(false);
   const saveTimerRef = useRef<number | undefined>(undefined);
+  const timelineRef = useRef<HTMLElement | null>(null);
+  const followBottomRef = useRef(false);
+  const scrollFrameRef = useRef<number | undefined>(undefined);
+  const skillItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const locale = settings?.locale ?? "en";
   const t = getCopy(locale);
@@ -565,6 +620,9 @@ export function App() {
   const pageReadable = Boolean(page);
   const autoRunAllowed = Boolean(sitePermission?.autoRun);
   const debuggerAllowed = Boolean(sitePermission?.scopes.includes("debugger.control"));
+  const activeProviderModel = selectedProvider && activeModel ? `${selectedProvider.name || selectedProvider.provider} / ${activeModel}` : t.noProviderModel;
+  const stalePageConnection = !isConnectedToActivePage(page, activePage);
+  const storedPageMatches = filterStoredConversationPages(storedPages, storedPageSearch);
 
   const refreshSettings = async () => {
     const loaded = await sendRuntimeMessage<ExtensionSettings>({ type: "agenticify:get-settings" }, t);
@@ -582,11 +640,29 @@ export function App() {
     try {
       const observation = await sendRuntimeMessage<ObservedPage>({ type: "agenticify:observe-active-tab" }, t);
       setPage(observation);
+      setActivePage({
+        tabId: observation.tabId,
+        title: observation.title,
+        url: observation.url,
+        origin: observation.origin
+      });
       return observation;
     } catch (error) {
       setItems((current) => [...current, { kind: "error", title: t.error, detail: error instanceof Error ? error.message : "Could not read the page." }]);
       return null;
     }
+  };
+
+  const refreshActivePageSummary = async () => {
+    const summary = await sendRuntimeMessage<ActivePageSummary>({ type: "agenticify:get-active-tab-summary" }, t);
+    setActivePage(summary);
+    return summary;
+  };
+
+  const refreshStoredPages = async () => {
+    const pages = await loadStoredConversationPages();
+    setStoredPages(pages);
+    return pages;
   };
 
   useEffect(() => {
@@ -595,6 +671,10 @@ export function App() {
       .catch(() => setSettings(null));
     refreshSkills()
       .catch(() => setComposerSkills([]));
+    refreshActivePageSummary()
+      .catch(() => setActivePage(null));
+    refreshStoredPages()
+      .catch(() => setStoredPages([]));
 
     const onChanged = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
       if (areaName !== "local") return;
@@ -610,18 +690,32 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const origin = page?.origin ?? "";
-    setConversationOrigin(origin);
+    const refresh = () => {
+      refreshActivePageSummary().catch(() => undefined);
+    };
+    const interval = window.setInterval(refresh, 1500);
+    chrome.tabs?.onActivated?.addListener(refresh);
+    chrome.tabs?.onUpdated?.addListener(refresh);
+    return () => {
+      window.clearInterval(interval);
+      chrome.tabs?.onActivated?.removeListener(refresh);
+      chrome.tabs?.onUpdated?.removeListener(refresh);
+    };
+  }, []);
+
+  useEffect(() => {
+    const pageUrl = page?.url ?? "";
+    setConversationPageUrl(pageUrl);
     setConversationLoaded(false);
 
-    if (!origin) {
+    if (!pageUrl) {
       setItems([]);
       setConversationLoaded(true);
       return;
     }
 
     let canceled = false;
-    loadSiteConversation(origin)
+    loadSiteConversation(pageUrl)
       .then((storedItems) => {
         if (canceled) return;
         setItems(storedItems);
@@ -636,18 +730,23 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [page?.origin, t.error]);
+  }, [page?.url, t.error]);
 
   useEffect(() => {
-    if (!conversationOrigin || !conversationLoaded) return;
+    if (!conversationPageUrl || !conversationLoaded) return;
     if (saveTimerRef.current !== undefined) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
-      saveSiteConversation(conversationOrigin, items).catch(() => undefined);
+      saveSiteConversation(conversationPageUrl, items)
+        .then(() => {
+          if (!items.length || !page?.url) return undefined;
+          return saveStoredConversationPage({ title: page.title, url: page.url, origin: page.origin }).then(setStoredPages);
+        })
+        .catch(() => undefined);
     }, 250);
     return () => {
       if (saveTimerRef.current !== undefined) window.clearTimeout(saveTimerRef.current);
     };
-  }, [conversationOrigin, conversationLoaded, items]);
+  }, [conversationPageUrl, conversationLoaded, items, page?.origin, page?.title, page?.url]);
 
   useEffect(() => {
     if (!settings) return;
@@ -678,17 +777,41 @@ export function App() {
     setActiveSkillIndex(skillMatches.length > 0 ? 0 : -1);
   }, [showSkillPicker, skillQuery, skillMatches.length]);
 
+  useEffect(() => {
+    if (!showSkillPicker || activeSkillIndex < 0) return;
+    skillItemRefs.current[activeSkillIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeSkillIndex, showSkillPicker]);
+
+  useEffect(() => {
+    const element = timelineRef.current;
+    if (!element || !followBottomRef.current) return;
+    if (scrollFrameRef.current !== undefined) window.cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = undefined;
+      const latest = timelineRef.current;
+      if (!latest || !followBottomRef.current) return;
+      latest.scrollTo({ top: latest.scrollHeight, behavior: "auto" });
+    });
+    return () => {
+      if (scrollFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+        scrollFrameRef.current = undefined;
+      }
+    };
+  }, [items.length, busy]);
+
   const openOptions = () => {
     chrome.runtime.openOptionsPage();
   };
 
   const clearConversation = async () => {
-    const origin = conversationOrigin;
+    const pageUrl = conversationPageUrl;
     setItems([]);
-    if (!origin) return;
-    await clearSiteConversation(origin).catch((error) => {
+    if (!pageUrl) return;
+    await clearSiteConversation(pageUrl).catch((error) => {
       setItems([{ kind: "error", title: t.error, detail: error instanceof Error ? error.message : "Could not clear conversation." }]);
     });
+    await removeStoredConversationPage(pageUrl).then(setStoredPages).catch(() => undefined);
   };
 
   const queueDebuggerAccessCard = () => {
@@ -705,10 +828,12 @@ export function App() {
     });
   };
 
-  const runTask = async (task: string) => {
+  const runTask = async (task: string, displayText?: string) => {
     const submittedTask = task.trim();
     if (!submittedTask || busyRef.current) return;
+    const userVisibleTask = displayText?.trim() || submittedTask;
     const submittedSkill = selectedSkill;
+    followBottomRef.current = true;
     busyRef.current = true;
     setBusy(true);
     setInput("");
@@ -742,7 +867,7 @@ export function App() {
           return;
         }
         const targetPage = !page?.tabId ? await refreshPage() : page;
-        setItems((current) => [...current, { kind: "user", title: t.userTask, detail: submittedTask, meta: userMessageMeta("debugger", submittedSkill) }]);
+        setItems((current) => [...current, { kind: "user", title: t.userTask, detail: userVisibleTask, meta: userMessageMeta("debugger", submittedSkill) }]);
         const result = await sendRuntimeMessage<BenchmarkToolResult>({
           type: "agenticify:benchmark-tool",
           request: directBenchmarkRequest,
@@ -763,7 +888,7 @@ export function App() {
       }
       const targetPage = mode === "debugger" && !page?.tabId ? await refreshPage() : page;
       const memory = timelineItemsToConversationMemory(items);
-      setItems((current) => [...current, { kind: "user", title: t.userTask, detail: submittedTask, meta: userMessageMeta(mode, submittedSkill) }]);
+      setItems((current) => [...current, { kind: "user", title: t.userTask, detail: userVisibleTask, meta: userMessageMeta(mode, submittedSkill) }]);
       const result = await sendRuntimeMessage<{ finalText: string; events?: AgentEvent[] }>(buildSidebarRunMessage({
         task: submittedTask,
         mode,
@@ -780,6 +905,12 @@ export function App() {
     } finally {
       busyRef.current = false;
       setBusy(false);
+      window.requestAnimationFrame(() => {
+        const element = timelineRef.current;
+        if (element && followBottomRef.current) {
+          element.scrollTo({ top: element.scrollHeight, behavior: "auto" });
+        }
+      });
     }
   };
 
@@ -897,12 +1028,17 @@ export function App() {
     setInput((current) => current.replace(/(?:^|\s)@[^\s@]*$/, "").trimStart());
   };
 
+  const selectStoredPage = (storedPage: StoredConversationPage) => {
+    setShowStoredPages(false);
+    setStoredPageSearch("");
+    setPage(storedConversationPageToObservation(storedPage));
+    followBottomRef.current = true;
+  };
+
   const actions = [
-    { label: t.summarize, detail: t.summarizeDetail, icon: FileText, task: t.summarizeTask },
-    { label: t.askPage, detail: t.askPageDetail, icon: Bot, task: t.askPageTask },
-    { label: t.extract, detail: t.extractDetail, icon: ListFilter, task: t.extractTask },
-    { label: t.write, detail: t.writeDetail, icon: PenLine, task: t.writeTask },
-    { label: t.customTask, detail: t.customTaskDetail, icon: Wand2, task: input || t.customTaskFallback }
+    { label: t.summarize, detail: t.summarizeDetail, icon: FileText, task: t.summarizeTask, requiresModel: true },
+    { label: t.translate, detail: t.translateDetail, icon: Languages, task: t.translateTask, requiresModel: true },
+    { label: t.screenshotTask, detail: t.screenshotDetail, icon: Camera, task: t.screenshotTaskInstruction, requiresModel: false }
   ];
 
   return (
@@ -912,7 +1048,7 @@ export function App() {
           <Sparkles size={17} />
         </div>
         <div className="brand-copy">
-          <div className="brand-title">Haro</div>
+          <div className="brand-title">{t.aiBrowserConsole}</div>
           <div className="brand-subtitle">{t.browserAiTagline}</div>
         </div>
         <div className="topbar-actions">
@@ -935,24 +1071,93 @@ export function App() {
               <small>{page?.url || page?.origin || t.noActivePage}</small>
             </span>
           </div>
-          <button className="summary-icon-button" type="button" title={t.refresh} onClick={refreshPage}>
-            <RefreshCw size={15} />
+          <button
+            className={showStoredPages ? "summary-icon-button active" : "summary-icon-button"}
+            type="button"
+            title={t.conversationPages}
+            onClick={() => setShowStoredPages((value) => !value)}
+            aria-expanded={showStoredPages}
+          >
+            <History size={15} />
           </button>
           <button className="summary-icon-button" type="button" onClick={() => setShowDetails((value) => !value)} aria-expanded={showDetails} title={showDetails ? t.collapse : t.expand}>
             <ChevronRight className={showDetails ? "summary-chevron open" : "summary-chevron"} size={15} />
           </button>
         </div>
 
+        {stalePageConnection && (
+          <div className="stale-page-banner">
+            <span className="stale-page-text">{t.activePagePrompt}</span>
+            <span className="stale-page-url" title={activePage?.url || activePage?.title || undefined}>
+              {activePage?.title || activePage?.url || t.unknown}
+            </span>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                refreshPage().then((nextPage) => {
+                  if (nextPage) {
+                    setItems((current) => [...current, { kind: "system", title: t.connectedCurrentPage, detail: nextPage.url }]);
+                  }
+                });
+              }}
+            >
+              {t.connectCurrentPage}
+            </button>
+          </div>
+        )}
+
+        {showStoredPages && (
+          <section className="stored-pages-panel">
+            <div className="stored-pages-header">
+              <span>{t.conversationPages}</span>
+              <button type="button" title={t.refresh} onClick={() => refreshStoredPages().catch(() => undefined)}>
+                <RefreshCw size={12} />
+              </button>
+            </div>
+            <input
+              type="search"
+              value={storedPageSearch}
+              placeholder={t.searchPages}
+              onChange={(event) => setStoredPageSearch(event.target.value)}
+            />
+            <div className="stored-pages-list">
+              {storedPageMatches.length ? storedPageMatches.map((storedPage) => (
+                <button
+                  className={page?.url === storedPage.url ? "stored-page-item active" : "stored-page-item"}
+                  key={storedPage.url}
+                  type="button"
+                  onClick={() => selectStoredPage(storedPage)}
+                >
+                  <strong>{storedPage.title || storedPage.origin}</strong>
+                  <span>{storedPage.url}</span>
+                </button>
+              )) : (
+                <div className="stored-pages-empty">{t.noMatchingPages}</div>
+              )}
+            </div>
+          </section>
+        )}
+
         {showDetails && (
           <div className="context-details">
+            <div className="section-label">{t.pageContext}</div>
             <div className="context-grid">
+              <div>
+                <span>{t.currentPage}</span>
+                <strong>{page?.title || t.openPage}</strong>
+              </div>
+              <div>
+                <span>{t.pageUrl}</span>
+                <strong>{page?.url || t.noActivePage}</strong>
+              </div>
               <div>
                 <span>{t.readStatus}</span>
                 <strong>{pageReadable ? t.available : t.unavailable}</strong>
               </div>
               <div>
-                <span>{t.modelStatus}</span>
-                <strong>{modelReady ? t.configured : t.notConfigured}</strong>
+                <span>{t.providerModel}</span>
+                <strong>{modelReady ? activeProviderModel : t.notConfigured}</strong>
               </div>
             </div>
             <div className="mode-control" aria-label={t.controlMode}>
@@ -1002,16 +1207,35 @@ export function App() {
         </section>
       )}
 
-      <section className="timeline">
+      <section
+        className="timeline"
+        ref={timelineRef}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          if (!isScrolledNearBottom(element)) followBottomRef.current = false;
+        }}
+      >
         <div className="timeline-header">
-          <div className="section-label">{t.timeline}</div>
+          <div />
           <button className="timeline-clear-button" type="button" disabled={busy || items.length === 0} onClick={clearConversation} title={t.clearConversation}>
             <Trash2 size={13} />
             <span>{t.clearConversation}</span>
           </button>
         </div>
         {items.length === 0 && !busy && (
-          <div className="timeline-empty">{t.emptyTimeline}</div>
+          <div className="timeline-empty">
+            <div className="empty-greeting">
+              <strong>{t.ready}</strong>
+              <span>{t.emptyTimeline}</span>
+            </div>
+            <div className="empty-suggestions">
+              {actions.slice(0, 3).map((action) => (
+                <button type="button" key={action.label} disabled={busy || (action.requiresModel && !modelReady)} onClick={() => runTask(action.task, action.label)}>
+                  {action.detail}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
         {items.map((item, index) => {
           const isChatMessage = (item.kind === "user" || item.kind === "final") && !item.image && !item.html;
@@ -1022,7 +1246,6 @@ export function App() {
           if (isTrace) {
             return (
               <div className={`timeline-row trace ${item.kind}`} key={index}>
-                <div className="trace-rail" aria-hidden="true" />
                 <details className="trace-card">
                   <summary>
                     <span className={item.kind === "blocked" ? "trace-status blocked" : "trace-status"} />
@@ -1036,29 +1259,48 @@ export function App() {
           }
 
           if (isChatMessage) {
+            if (item.kind === "user") {
+              const skillMeta = item.meta?.startsWith("@") ? item.meta : undefined;
+              return (
+                <div className="conversation-message user-message" key={index}>
+                  <div className="chat-bubble user-bubble">
+                    {skillMeta && (
+                      <div className="message-skill-prefix">
+                        <Sparkles size={12} />
+                        <span>{skillMeta}</span>
+                      </div>
+                    )}
+                    <div className="timeline-detail"><MessageContent text={item.detail} /></div>
+                  </div>
+                  <button className="copy-message-button outside-copy-button" type="button" title="Copy message" onClick={() => copyText(item.detail)}>
+                    <Copy size={12} />
+                    <span>{t.copy}</span>
+                  </button>
+                </div>
+              );
+            }
+
             return (
-              <div className={`timeline-row chat ${item.kind}`} key={index}>
-                <div className="timeline-marker">{item.kind === "user" ? "U" : <CheckCircle2 size={12} />}</div>
-                <div className="chat-bubble">
-                  <div className="timeline-title">
-                    <span>{item.title}</span>
-                    {item.meta && <em>{item.meta}</em>}
+              <div className="conversation-message assistant-message-row" key={index}>
+                <div className="assistant-message">
+                  <div className="assistant-name">
+                    <span className="assistant-logo" aria-hidden="true">
+                      <Sparkles size={11} />
+                    </span>
+                    <span>Haro</span>
                   </div>
                   <div className="timeline-detail"><MessageContent text={item.detail} /></div>
-                  <div className="timeline-footer">
-                    <button className="copy-message-button" type="button" title="Copy message" onClick={() => copyText(item.detail)}>
-                      <Copy size={12} />
-                      <span>{t.copy}</span>
-                    </button>
-                  </div>
                 </div>
+                <button className="copy-message-button outside-copy-button" type="button" title="Copy message" onClick={() => copyText(item.detail)}>
+                  <Copy size={12} />
+                  <span>{t.copy}</span>
+                </button>
               </div>
             );
           }
 
           return (
             <div className={`timeline-row ${isArtifact ? "artifact" : ""} ${item.kind}`} key={index}>
-              <div className="timeline-marker">{item.kind === "error" || item.kind === "blocked" ? "!" : <CheckCircle2 size={12} />}</div>
               <div className={isPermission ? "permission-card" : isArtifact ? "artifact-card" : "status-card"}>
                 <div className="timeline-title">
                   <span>{item.title}</span>
@@ -1115,7 +1357,6 @@ export function App() {
         })}
         {busy && (
           <div className="timeline-row trace reasoning">
-            <div className="trace-rail" aria-hidden="true" />
             <div className="trace-card working">
               <div className="trace-working-title"><Loader2 size={12} /> {t.workingTitle}</div>
               <div className="trace-working-detail">{t.working}</div>
@@ -1125,14 +1366,16 @@ export function App() {
       </section>
 
       <section className="composer">
-        <div className="composer-actions" aria-label={t.quickTasks}>
-          {actions.map((action) => (
-            <button className="task-button" disabled={busy || !modelReady} key={action.label} onClick={() => runTask(action.task)}>
-              <action.icon size={15} />
-              <span>{action.label}</span>
-            </button>
-          ))}
-        </div>
+        <section className="quick-task-panel">
+          <div className="composer-actions" aria-label={t.quickTasks}>
+            {actions.map((action) => (
+              <button className="task-button" disabled={busy || (action.requiresModel && !modelReady)} key={action.label} onClick={() => runTask(action.task, action.label)}>
+                <action.icon size={15} />
+                <span>{action.label}</span>
+              </button>
+            ))}
+          </div>
+        </section>
         <div className="composer-shell">
           {(selectedSkill || showSkillPicker) && (
             <div className="skill-composer-panel">
@@ -1155,6 +1398,9 @@ export function App() {
                     <div className="skill-picker-list">
                       {skillMatches.map((skill, index) => (
                         <button
+                          ref={(element) => {
+                            skillItemRefs.current[index] = element;
+                          }}
                           className={index === activeSkillIndex ? "skill-picker-item active" : "skill-picker-item"}
                           type="button"
                           key={skill.id}
@@ -1215,6 +1461,7 @@ export function App() {
           />
           <div className="composer-footer">
             <div className="model-selector-row">
+              <span className="composer-hint">{t.enterToSend}</span>
               <Select
                 value={activeModelSelection}
                 onValueChange={(value) => {

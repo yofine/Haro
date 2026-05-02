@@ -87,6 +87,46 @@ export type GatewaySettings = {
   enabled: boolean;
 };
 
+export type LocalModelRuntime = "webllm";
+export type LocalModelPurpose = "intent" | "privacy" | "simple-chat" | "agent-policy";
+export type LocalModelLoadState = "not-loaded" | "loading" | "ready" | "failed";
+export type LocalModelCacheBackend = "cache" | "indexeddb";
+export type PrivacyPolicyMode = "off" | "redact" | "block" | "ask";
+
+export type LocalModelProfile = {
+  id: string;
+  name: string;
+  runtime: LocalModelRuntime;
+  modelId: string;
+  enabled: boolean;
+  loadState: LocalModelLoadState;
+  purposes: LocalModelPurpose[];
+  defaultForPurposes: LocalModelPurpose[];
+  cacheBackend: LocalModelCacheBackend;
+  temperature: number;
+  maxTokens: number;
+  contextWindowHint?: number;
+  createdAt: string;
+  updatedAt: string;
+  lastLoadedAt?: string;
+  lastError?: string;
+};
+
+export type LocalModelPrivacySettings = {
+  mode: PrivacyPolicyMode;
+  scanPageText: boolean;
+  scanSelectedText: boolean;
+  scanFormValues: boolean;
+  blockHighConfidenceSecrets: boolean;
+};
+
+export type LocalModelSettings = {
+  enabled: boolean;
+  defaultProfileId?: string;
+  profiles: LocalModelProfile[];
+  privacy: LocalModelPrivacySettings;
+};
+
 export type AgentMemoryScope = "global" | "site";
 export type AgentMemoryLayer = "profile" | "site" | "interaction";
 export type AgentMemorySource = "explicit" | "manual" | "auto" | "summary";
@@ -110,6 +150,7 @@ export type ExtensionSettings = {
   defaultProviderId?: string;
   defaultModel?: string;
   gateway: GatewaySettings;
+  localModels: LocalModelSettings;
   skills: InstalledSkill[];
   memories: AgentMemory[];
   permissions: SitePermission[];
@@ -153,7 +194,8 @@ export type DomAction =
 export type AgentReadAction = { type: "read" };
 export type AgentDebuggerAction = { type: "debugger"; reason?: string };
 export type AgentSkillAction = { type: "skill"; skillId: string; input?: Record<string, unknown> };
-export type AgentAction = DomAction | AgentReadAction | AgentDebuggerAction | AgentSkillAction;
+export type AgentToolAction = { type: "tool"; toolId: string; input: Record<string, unknown> };
+export type AgentAction = DomAction | AgentReadAction | AgentDebuggerAction | AgentSkillAction | AgentToolAction;
 export type AgentActionStatus = "success" | "failed" | "needs_confirmation" | "blocked";
 
 export type DomActionResult = {
@@ -162,6 +204,7 @@ export type DomActionResult = {
   message: string;
   skillDraft?: InstalledSkill;
   benchmarkResult?: BenchmarkToolResult;
+  events?: AgentEvent[];
 };
 
 export type DebuggerSnapshot = DomObservation & {
@@ -188,6 +231,7 @@ export type DebuggerActionResult = {
   screenshot?: PageScreenshot;
   rewrite?: PageRewriteResult;
   formFill?: FormFillResult;
+  script?: PageScriptResult;
 };
 
 export type PageScreenshot = {
@@ -220,6 +264,19 @@ export type FormFillResult = {
   skipped: Array<{ selector: string; reason: string }>;
 };
 
+export type PageScriptResult = {
+  scriptId?: string;
+  language: "js" | "css";
+  changed?: number;
+  details?: unknown;
+};
+
+export type ArticleParagraph = {
+  index: number;
+  text: string;
+  language?: string;
+};
+
 export type BenchmarkToolRequest =
   | { type: "screenshot" }
   | { type: "report" }
@@ -234,6 +291,13 @@ export type InstalledSkill = {
   skillMarkdown: string;
   enabled: boolean;
   source: "builtin" | "skills.sh" | "manual";
+  runtime?: "prompt" | "browser";
+  version?: number;
+  risk?: "low" | "medium" | "high";
+  capabilities?: string[];
+  tools?: string[];
+  scripts?: string[];
+  scriptAssets?: Record<string, string>;
   sourceUrl?: string;
   installedAt?: string;
   updatedAt?: string;
@@ -244,7 +308,8 @@ export type BenchmarkToolResult =
   | { type: "report"; title: string; html: string }
   | { type: "rewrite"; title: string; rewrite: PageRewriteResult }
   | { type: "restore-rewrite"; title: string; restored: number }
-  | { type: "fill-form"; title: string; formFill: FormFillResult };
+  | { type: "fill-form"; title: string; formFill: FormFillResult }
+  | { type: "script"; title: string; script: PageScriptResult };
 
 export type AgentEvent =
   | { type: "observe"; observation: DomObservation }
@@ -263,17 +328,21 @@ export type GatewayErrorCode =
   | "page_unavailable"
   | "page_not_operable"
   | "debugger_control_unavailable"
+  | "privacy_blocked"
   | "invalid_request"
   | "internal_error";
 
-export type GatewayMethod = "requestAccess" | "getStatus" | "chat" | "run" | "models.list";
+export type GatewayMethod = "requestAccess" | "getStatus" | "chat" | "run" | "models.list" | "local.status" | "local.classify" | "local.chat";
 
 export type BrowserAgentRequest =
   | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "requestAccess"; payload: AccessRequestPayload }
   | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "getStatus"; payload?: undefined }
   | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "chat"; payload: ChatPayload }
   | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "run"; payload: RunPayload }
-  | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "models.list"; payload?: undefined };
+  | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "models.list"; payload?: undefined }
+  | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "local.status"; payload?: undefined }
+  | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "local.classify"; payload: LocalClassifyPayload }
+  | { id: string; requestId: string; source: "agenticify-page"; version: "1"; method: "local.chat"; payload: LocalChatPayload };
 
 export type GatewayError = {
   code: GatewayErrorCode;
@@ -309,4 +378,14 @@ export type ChatPayload = {
 export type RunPayload = {
   task: string;
   mode?: AgentControlMode;
+};
+
+export type LocalClassifyPayload = {
+  text: string;
+};
+
+export type LocalChatPayload = {
+  messages: ChatMessage[];
+  maxTokens?: number;
+  temperature?: number;
 };

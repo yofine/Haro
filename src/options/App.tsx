@@ -22,11 +22,52 @@ import { Switch } from "../components/ui/switch";
 import { Textarea } from "../components/ui/textarea";
 import { getCopy } from "../shared/i18n";
 import { defaultSettings, normalizeSettings } from "../shared/storage";
-import type { AgentMemory, ExtensionSettings, InstalledSkill, PendingAccessRequest, Provider, ProviderSettings, Scope } from "../shared/types";
+import type {
+  AgentMemory,
+  ExtensionSettings,
+  InstalledSkill,
+  LocalModelCacheBackend,
+  LocalModelLoadState,
+  LocalModelPrivacySettings,
+  LocalModelProfile,
+  LocalModelPurpose,
+  PendingAccessRequest,
+  PrivacyPolicyMode,
+  Provider,
+  ProviderSettings,
+  Scope
+} from "../shared/types";
 import "./styles.css";
 
 type Tab = "models" | "skills" | "memory" | "gateway" | "sites" | "history" | "advanced" | "system";
-type GatewayExampleTab = "access" | "debugger" | "status" | "models" | "chat" | "run";
+type GatewayExampleTab = "access" | "debugger" | "status" | "models" | "chat" | "local" | "run";
+
+const localModelPurposes: LocalModelPurpose[] = ["intent", "simple-chat", "privacy", "agent-policy"];
+const localModelPurposeCopy: Record<LocalModelPurpose, { title: string; detail: string }> = {
+  intent: {
+    title: "Intent detection",
+    detail: "Classify chat, page Q&A, memory, browser tasks, or unsupported requests locally."
+  },
+  "simple-chat": {
+    title: "Simple answers",
+    detail: "Handle short page snippets, selected text, light translation, and formatting faster."
+  },
+  privacy: {
+    title: "Privacy guard",
+    detail: "Detect and redact sensitive page data before external model calls."
+  },
+  "agent-policy": {
+    title: "Agent policy",
+    detail: "Suggest context minimization, risk level, and whether external escalation is needed."
+  }
+};
+
+const loadStateLabels: Record<LocalModelLoadState, string> = {
+  "not-loaded": "Not loaded",
+  loading: "Loading",
+  ready: "Ready",
+  failed: "Failed"
+};
 
 const navItems: Array<{
   id: Tab;
@@ -75,6 +116,25 @@ function createProvider(provider: Provider = "openai"): ProviderSettings {
     apiKey: "",
     enabled: true,
     ...defaults
+  };
+}
+
+function createLocalModelProfile(): LocalModelProfile {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    name: "",
+    runtime: "webllm",
+    modelId: "",
+    enabled: false,
+    loadState: "not-loaded",
+    purposes: ["intent", "privacy", "simple-chat"],
+    defaultForPurposes: ["intent", "privacy", "simple-chat"],
+    cacheBackend: "indexeddb",
+    temperature: 0,
+    maxTokens: 256,
+    createdAt: now,
+    updatedAt: now
   };
 }
 
@@ -236,6 +296,30 @@ if (chat.ok) {
 }`
   },
   {
+    id: "local",
+    label: "Local",
+    title: "Use the on-device model",
+    description: "Check local model readiness, classify intent/privacy locally, or answer simple prompts without sending content to an external provider.",
+    code: `const status = await window.browserAgent.local.status();
+
+if (status.ok && status.result.ready) {
+  const classification = await window.browserAgent.local.classify({
+    text: "Remember that my invoice email is ada@example.com"
+  });
+
+  const localAnswer = await window.browserAgent.local.chat({
+    messages: [
+      { role: "system", content: "Answer briefly." },
+      { role: "user", content: "What does CORS mean?" }
+    ],
+    maxTokens: 128,
+    temperature: 0
+  });
+
+  console.log(classification.result, localAnswer.result.text);
+}`
+  },
+  {
     id: "run",
     label: "Run",
     title: "Run a browser task",
@@ -279,6 +363,7 @@ export function App() {
     () => modelDraft.providers.find((provider) => provider.id === modelDraft.defaultProviderId) ?? modelDraft.providers[0],
     [modelDraft]
   );
+  const readyLocalModel = modelDraft.localModels.profiles.find((profile) => profile.enabled && profile.loadState === "ready");
   const gatewayExample = gatewayExamples.find((example) => example.id === gatewayExampleTab) ?? gatewayExamples[0];
 
   useEffect(() => {
@@ -525,6 +610,89 @@ export function App() {
   const resetModelDraft = () => {
     setModelDraft(settings);
     setStatus("");
+  };
+
+  const updateLocalModels = (localModels: ExtensionSettings["localModels"]) => {
+    setModelDraft((current) => ({ ...current, localModels }));
+  };
+
+  const addLocalModelProfile = () => {
+    const profile = createLocalModelProfile();
+    setModelDraft((current) => ({
+      ...current,
+      localModels: {
+        ...current.localModels,
+        defaultProfileId: current.localModels.defaultProfileId || profile.id,
+        profiles: [profile, ...current.localModels.profiles]
+      }
+    }));
+  };
+
+  const updateLocalModelProfile = (updated: LocalModelProfile) => {
+    setModelDraft((current) => ({
+      ...current,
+      localModels: {
+        ...current.localModels,
+        profiles: current.localModels.profiles.map((profile) => profile.id === updated.id ? { ...updated, updatedAt: new Date().toISOString() } : profile)
+      }
+    }));
+  };
+
+  const removeLocalModelProfile = (id: string) => {
+    setModelDraft((current) => {
+      const profiles = current.localModels.profiles.filter((profile) => profile.id !== id);
+      const fallback = profiles[0];
+      return {
+        ...current,
+        localModels: {
+          ...current.localModels,
+          enabled: current.localModels.defaultProfileId === id ? false : current.localModels.enabled,
+          defaultProfileId: current.localModels.defaultProfileId === id ? fallback?.id : current.localModels.defaultProfileId,
+          profiles
+        }
+      };
+    });
+  };
+
+  const updateLocalModelPrivacy = (patch: Partial<LocalModelPrivacySettings>) => {
+    setModelDraft((current) => ({
+      ...current,
+      localModels: {
+        ...current.localModels,
+        privacy: { ...current.localModels.privacy, ...patch }
+      }
+    }));
+  };
+
+  const toggleLocalModelPurpose = (profile: LocalModelProfile, purpose: LocalModelPurpose, enabled: boolean) => {
+    const purposes = enabled
+      ? [...new Set([...profile.purposes, purpose])]
+      : profile.purposes.filter((item) => item !== purpose);
+    updateLocalModelProfile({
+      ...profile,
+      purposes,
+      defaultForPurposes: profile.defaultForPurposes.filter((item) => purposes.includes(item))
+    });
+  };
+
+  const loadLocalModel = async (profile: LocalModelProfile) => {
+    if (!profile.modelId.trim()) {
+      setStatus("WebLLM model ID is required.");
+      return;
+    }
+    updateLocalModelProfile({ ...profile, loadState: "loading", enabled: false, lastError: undefined });
+    try {
+      await sendRuntimeMessage({ type: "agenticify:local-model-load", profileId: profile.id });
+      const loaded = normalizeSettings(await sendRuntimeMessage<ExtensionSettings>({ type: "agenticify:get-settings" }));
+      setSettings(loaded);
+      setModelDraft(loaded);
+      setStatus(t.saved);
+    } catch (error) {
+      const loaded = normalizeSettings(await sendRuntimeMessage<ExtensionSettings>({ type: "agenticify:get-settings" }).catch(() => modelDraft));
+      setSettings(loaded);
+      setModelDraft(loaded);
+      setStatus(error instanceof Error ? error.message : "Could not load local model");
+    }
   };
 
   const resolveAccessRequest = async (approved: boolean) => {
@@ -834,6 +1002,179 @@ export function App() {
                 </div>
               </Card>
             )}
+
+            <Card className="local-model-panel">
+              <div className="local-model-heading">
+                <div>
+                  <p className="eyebrow">{t.localModelsEyebrow}</p>
+                  <h2>{t.localModels}</h2>
+                  <p>{t.localModelsCopy}</p>
+                </div>
+                <div className="local-model-actions">
+                  <span className={modelDraft.localModels.enabled ? "status-pill on" : "status-pill"}>
+                    {modelDraft.localModels.enabled ? t.enabled : t.disabled}
+                  </span>
+                  <Label className="switch-label">
+                    <Switch
+                      checked={modelDraft.localModels.enabled}
+                      disabled={!readyLocalModel}
+                      onCheckedChange={(checked) => updateLocalModels({ ...modelDraft.localModels, enabled: checked })}
+                    />
+                    {t.enabled}
+                  </Label>
+                  <Button variant="secondary" onClick={addLocalModelProfile}><Plus size={15} /> {t.addLocalModel}</Button>
+                </div>
+              </div>
+
+              {!readyLocalModel && (
+                <div className="local-model-warning">
+                  <strong>{t.localModelNotActive}</strong>
+                  <span>{t.localModelNotActiveCopy}</span>
+                </div>
+              )}
+
+              <div className="local-model-use-grid">
+                {localModelPurposes.map((purpose) => (
+                  <div className="local-model-use" key={purpose}>
+                    <strong>{localModelPurposeCopy[purpose].title}</strong>
+                    <span>{localModelPurposeCopy[purpose].detail}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="local-model-list">
+                {modelDraft.localModels.profiles.map((profile) => (
+                  <div className="local-model-card" key={profile.id}>
+                    <div className="local-model-card-top">
+                      <div>
+                        <Input
+                          className="provider-name"
+                          placeholder={t.localModelNamePlaceholder}
+                          value={profile.name}
+                          onChange={(event) => updateLocalModelProfile({ ...profile, name: event.target.value })}
+                        />
+                        <div className="provider-meta">WebLLM · {loadStateLabels[profile.loadState]} · {profile.cacheBackend}</div>
+                      </div>
+                      <div className="provider-actions">
+                        <Label className="switch-label">
+                          <Switch
+                            checked={profile.enabled}
+                            disabled={profile.loadState !== "ready"}
+                            onCheckedChange={(checked) => updateLocalModelProfile({ ...profile, enabled: checked })}
+                          />
+                          {t.enabled}
+                        </Label>
+                        <Button variant="secondary" disabled={profile.loadState === "loading" || !profile.modelId.trim()} onClick={() => loadLocalModel(profile)} title={t.downloadLoadPending}>{t.downloadLoad}</Button>
+                        <Button variant="destructive" size="icon" onClick={() => removeLocalModelProfile(profile.id)} title="Remove local model"><Trash2 size={16} /></Button>
+                      </div>
+                    </div>
+
+                    <div className="provider-grid">
+                      <div>
+                        <Label>{t.localModelId}</Label>
+                        <Input
+                          className="mt-2"
+                          placeholder="Qwen2-0.5B-Instruct-q4f16_1-MLC"
+                          value={profile.modelId}
+                          onChange={(event) => updateLocalModelProfile({ ...profile, modelId: event.target.value, loadState: "not-loaded", enabled: false })}
+                        />
+                        <p className="field-hint">{t.localModelManualDownload}</p>
+                      </div>
+                      <div>
+                        <Label>{t.cacheBackend}</Label>
+                        <Select value={profile.cacheBackend} onValueChange={(value) => updateLocalModelProfile({ ...profile, cacheBackend: value as LocalModelCacheBackend })}>
+                          <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="indexeddb">IndexedDB</SelectItem>
+                            <SelectItem value="cache">Cache API</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label>{t.maxTokens}</Label>
+                        <Input
+                          className="mt-2"
+                          type="number"
+                          min={16}
+                          max={2048}
+                          value={profile.maxTokens}
+                          onChange={(event) => updateLocalModelProfile({ ...profile, maxTokens: Number(event.target.value) })}
+                        />
+                      </div>
+                      <div>
+                        <Label>{t.temperature}</Label>
+                        <Input
+                          className="mt-2"
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.1}
+                          value={profile.temperature}
+                          onChange={(event) => updateLocalModelProfile({ ...profile, temperature: Number(event.target.value) })}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="local-purpose-list">
+                      {localModelPurposes.map((purpose) => (
+                        <Label className="local-purpose-row" key={purpose}>
+                          <Switch checked={profile.purposes.includes(purpose)} onCheckedChange={(checked) => toggleLocalModelPurpose(profile, purpose, checked)} />
+                          <span>
+                            <strong>{localModelPurposeCopy[purpose].title}</strong>
+                            <small>{localModelPurposeCopy[purpose].detail}</small>
+                          </span>
+                        </Label>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
+                {modelDraft.localModels.profiles.length === 0 && (
+                  <div className="local-model-empty">
+                    <h2>{t.noLocalModels}</h2>
+                    <p>{t.noLocalModelsCopy}</p>
+                    <Button variant="secondary" onClick={addLocalModelProfile}><Plus size={15} /> {t.addLocalModel}</Button>
+                  </div>
+                )}
+              </div>
+
+              <div className="privacy-policy-panel">
+                <div>
+                  <h2>{t.privacyPolicy}</h2>
+                  <p>{t.privacyPolicyCopy}</p>
+                </div>
+                <div className="provider-grid">
+                  <div>
+                    <Label>{t.privacyMode}</Label>
+                    <Select value={modelDraft.localModels.privacy.mode} onValueChange={(value) => updateLocalModelPrivacy({ mode: value as PrivacyPolicyMode })}>
+                      <SelectTrigger className="mt-2"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="off">Off</SelectItem>
+                        <SelectItem value="redact">Redact</SelectItem>
+                        <SelectItem value="block">Block</SelectItem>
+                        <SelectItem value="ask">Ask</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Label className="local-purpose-row">
+                    <Switch checked={modelDraft.localModels.privacy.scanPageText} onCheckedChange={(checked) => updateLocalModelPrivacy({ scanPageText: checked })} />
+                    <span><strong>{t.scanPageText}</strong><small>{t.scanPageTextCopy}</small></span>
+                  </Label>
+                  <Label className="local-purpose-row">
+                    <Switch checked={modelDraft.localModels.privacy.scanSelectedText} onCheckedChange={(checked) => updateLocalModelPrivacy({ scanSelectedText: checked })} />
+                    <span><strong>{t.scanSelectedText}</strong><small>{t.scanSelectedTextCopy}</small></span>
+                  </Label>
+                  <Label className="local-purpose-row">
+                    <Switch checked={modelDraft.localModels.privacy.scanFormValues} onCheckedChange={(checked) => updateLocalModelPrivacy({ scanFormValues: checked })} />
+                    <span><strong>{t.scanFormValues}</strong><small>{t.scanFormValuesCopy}</small></span>
+                  </Label>
+                  <Label className="local-purpose-row">
+                    <Switch checked={modelDraft.localModels.privacy.blockHighConfidenceSecrets} onCheckedChange={(checked) => updateLocalModelPrivacy({ blockHighConfidenceSecrets: checked })} />
+                    <span><strong>{t.blockHighConfidenceSecrets}</strong><small>{t.blockHighConfidenceSecretsCopy}</small></span>
+                  </Label>
+                </div>
+              </div>
+            </Card>
           </section>
         )}
 
@@ -876,6 +1217,20 @@ export function App() {
                     </div>
                     <p>{skill.description}</p>
                     <div className="skill-meta">{skill.id}{skill.sourceUrl ? ` · ${skill.sourceUrl}` : ""}</div>
+                    <details className="skill-content">
+                      <summary>{t.viewSkillContent}</summary>
+                      <pre><code>{skill.skillMarkdown}</code></pre>
+                      {skill.scriptAssets && Object.entries(skill.scriptAssets).length > 0 && (
+                        <div className="skill-script-assets">
+                          {Object.entries(skill.scriptAssets).map(([path, code]) => (
+                            <div className="skill-script-asset" key={path}>
+                              <div className="skill-script-title">{path}</div>
+                              <pre><code>{code}</code></pre>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </details>
                   </div>
                   {!isBuiltInSkillId(skill.id) && (
                     <div className="skill-actions">
@@ -1047,6 +1402,15 @@ export function App() {
                 onCheckedChange={(checked) => save({ ...settings, gateway: { enabled: checked } })}
               />
             </div>
+            <Card className="gateway-local-status">
+              <div>
+                <h2>{t.localModelGatewayStatus}</h2>
+                <p>{settings.localModels.enabled ? t.localModelGatewayReady : t.localModelGatewayInactive}</p>
+              </div>
+              <span className={settings.localModels.enabled ? "status-pill on" : "status-pill"}>
+                {settings.localModels.enabled ? t.enabled : t.disabled}
+              </span>
+            </Card>
             <Card className="gateway-example-panel">
               <div className="example-tabs" role="tablist" aria-label="Gateway protocol examples">
                 {gatewayExamples.map((example) => (

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getActiveProvider, getDefaultLocale, normalizeSettings } from "./storage";
+import type { LocalModelCacheBackend, LocalModelPurpose } from "./types";
 
 describe("settings normalization", () => {
   it("uses the browser language as the default locale for new installs", () => {
@@ -13,6 +14,9 @@ describe("settings normalization", () => {
     const settings = normalizeSettings({});
 
     expect(settings.providers).toEqual([]);
+    expect(settings.localModels.enabled).toBe(false);
+    expect(settings.localModels.profiles).toEqual([]);
+    expect(settings.localModels.privacy.mode).toBe("redact");
     expect(settings.skills).toEqual([]);
     expect(settings.memories).toEqual([]);
     expect(settings.defaultProviderId).toBeUndefined();
@@ -161,5 +165,61 @@ describe("settings normalization", () => {
     });
     expect(settings.defaultProviderId).toBe("provider-a");
     expect(settings.defaultModel).toBe("model-a");
+  });
+
+  it("normalizes local model settings without enabling unloaded models", () => {
+    const settings = normalizeSettings({
+      localModels: {
+        enabled: true,
+        defaultProfileId: "local-a",
+        profiles: [
+          {
+            id: "local-a",
+            name: "  Local policy ",
+            runtime: "webllm",
+            modelId: "  Qwen2-0.5B-Instruct-q4f16_1-MLC ",
+            enabled: true,
+            loadState: "not-loaded",
+            purposes: ["intent", "privacy", "privacy", "unknown" as LocalModelPurpose],
+            defaultForPurposes: ["privacy", "simple-chat"],
+            cacheBackend: "bad-cache" as LocalModelCacheBackend,
+            temperature: 2,
+            maxTokens: -10,
+            createdAt: "",
+            updatedAt: ""
+          }
+        ],
+        privacy: {
+          mode: "block",
+          scanPageText: true,
+          scanSelectedText: false,
+          scanFormValues: true,
+          blockHighConfidenceSecrets: true
+        }
+      }
+    });
+
+    expect(settings.localModels.enabled).toBe(false);
+    expect(settings.localModels.defaultProfileId).toBe("local-a");
+    expect(settings.localModels.profiles[0]).toMatchObject({
+      id: "local-a",
+      name: "Local policy",
+      runtime: "webllm",
+      modelId: "Qwen2-0.5B-Instruct-q4f16_1-MLC",
+      enabled: false,
+      loadState: "not-loaded",
+      purposes: ["intent", "privacy"],
+      defaultForPurposes: ["privacy"],
+      cacheBackend: "indexeddb",
+      temperature: 1,
+      maxTokens: 256
+    });
+    expect(settings.localModels.privacy).toMatchObject({
+      mode: "block",
+      scanPageText: true,
+      scanSelectedText: false,
+      scanFormValues: true,
+      blockHighConfidenceSecrets: true
+    });
   });
 });

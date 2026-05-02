@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         sidepanel: resolve(__dirname, "sidepanel.html"),
         options: resolve(__dirname, "options.html"),
+        localModel: resolve(__dirname, "local-model.html"),
         background: resolve(__dirname, "src/background/index.ts"),
         content: resolve(__dirname, "src/content/index.ts"),
         injected: resolve(__dirname, "src/injected/browserAgent.ts")

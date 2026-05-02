@@ -1,4 +1,4 @@
-import type { AgentSkillAction, BenchmarkToolRequest, InstalledSkill } from "../shared/types";
+import type { InstalledSkill } from "../shared/types";
 
 type ParseOptions = {
   source?: InstalledSkill["source"];
@@ -15,31 +15,135 @@ const builtInSkillMarkdown = {
   screenshot: `---
 name: screenshot
 description: Capture a screenshot of the current browser page.
+runtime: browser
+version: 1
+risk: low
+capabilities:
+  - page.read.semanticOutline
+  - page.capture.fullPageScreenshot
+tools:
+  - page.read
+  - page.capture
 ---
 
 Use this skill when the user asks for a page screenshot, screen capture, visual capture, or PNG export.
-Action protocol: return {"action":{"type":"skill","skillId":"builtin/screenshot"},"reason":"...","confidence":0.9}.`,
+Return a browserToolPlan that reads the page outline and captures the full page:
+{"calls":[{"toolId":"page.read","input":{"mode":"semanticOutline"}},{"toolId":"page.capture","input":{"target":"fullPage"}}]}`,
   pageReport: `---
 name: page-report
 description: Create an HTML analysis report from the current page content.
+runtime: browser
+version: 1
+risk: low
+capabilities:
+  - page.read.semanticOutline
+  - page.read.visibleText
+  - artifacts.createHtmlReport
+tools:
+  - page.read
+  - artifacts.createHtmlReport
 ---
 
 Use this skill when the user asks for an analysis report, HTML report, page summary report, or exportable report.
-Action protocol: return {"action":{"type":"skill","skillId":"builtin/page-report"},"reason":"...","confidence":0.9}.`,
+Return a browserToolPlan that reads semantic outline and visible text, then creates a sanitized HTML report artifact:
+{"calls":[{"toolId":"page.read","input":{"mode":"semanticOutline"}},{"toolId":"page.read","input":{"mode":"visibleText"}},{"toolId":"artifacts.createHtmlReport","input":{}}]}`,
   rewritePage: `---
 name: rewrite-page
 description: Rewrite or translate visible page copy by safely changing DOM text nodes.
+runtime: browser
+version: 1
+risk: medium
+capabilities:
+  - page.read.textNodes
+  - page.write.rewriteTextNodes
+tools:
+  - page.read
+  - page.write
 ---
 
 Use this skill when the user asks to translate or rewrite the current page copy.
-Action protocol: return {"action":{"type":"skill","skillId":"builtin/rewrite-page","input":{"instruction":"user rewrite request"}},"reason":"...","confidence":0.9}.`,
+Return a browserToolPlan that reads indexed visible text nodes and rewrites them with rollback support:
+{"calls":[{"toolId":"page.read","input":{"mode":"textNodes"}},{"toolId":"page.write","input":{"operation":"rewriteTextNodes","instruction":"user rewrite request"}}]}`,
   fillForm: `---
 name: fill-form
 description: Fill page form fields from the user's description without submitting the form.
+runtime: browser
+version: 1
+risk: medium
+capabilities:
+  - page.read.forms
+  - page.write.setFormValues
+tools:
+  - page.read
+  - page.write
 ---
 
 Use this skill when the user asks to fill a form from provided details.
-Action protocol: return {"action":{"type":"skill","skillId":"builtin/fill-form","input":{"instruction":"user form filling request"}},"reason":"...","confidence":0.9}.`,
+Return a browserToolPlan that reads safe form descriptors and fills values. Never submit:
+{"calls":[{"toolId":"page.read","input":{"mode":"forms"}},{"toolId":"page.write","input":{"operation":"setFormValues","instruction":"user form filling request"}}]}`,
+  markPage: `---
+name: mark-page
+description: Visually mark important headings and interactive controls on the current page using bundled CSS and JS scripts.
+runtime: browser
+version: 1
+risk: medium
+capabilities:
+  - page.read.semanticOutline
+  - page.script.injectCss
+  - page.script.runJs
+tools:
+  - page.read
+  - page.script
+scripts:
+  - styles/mark-page.css
+  - scripts/mark-page.js
+---
+
+Use this skill when the user asks to highlight, mark, annotate, or visually inspect important page structure.
+Return a browserToolPlan that reads the page outline, injects the bundled CSS, then runs the bundled JS:
+{"calls":[{"toolId":"page.read","input":{"mode":"semanticOutline"}},{"toolId":"page.script","input":{"language":"css","scriptId":"styles/mark-page.css"}},{"toolId":"page.script","input":{"language":"js","scriptId":"scripts/mark-page.js"}}]}`,
+  immersiveTranslate: `---
+name: immersive-translate
+description: Insert immersive translations under article paragraphs while preserving the page layout and style.
+runtime: browser
+version: 1
+risk: medium
+capabilities:
+  - page.read.visibleText
+  - page.script.injectCss
+  - page.script.runJs
+tools:
+  - page.read
+  - page.script
+scripts:
+  - styles/immersive-reading.css
+  - scripts/immersive-translate.js
+---
+
+Use this skill when the user asks for immersive translation, bilingual reading, 沉浸式翻译, 双语阅读, or 对照翻译. Use the browser/system language unless the user asks for a specific target language.
+Return a browserToolPlan that reads visible text, injects immersive CSS, then runs the translation script with paragraph translations generated by the model:
+{"calls":[{"toolId":"page.read","input":{"mode":"visibleText"}},{"toolId":"page.script","input":{"language":"css","scriptId":"styles/immersive-reading.css"}},{"toolId":"page.script","input":{"language":"js","scriptId":"scripts/immersive-translate.js","generate":"generateParagraphTranslations","targetLanguage":"system","maxParagraphs":12,"batchSize":3}}]}`,
+  paragraphNotes: `---
+name: paragraph-notes
+description: Insert concise notes under article paragraphs to explain the main idea and clarify charts or figures.
+runtime: browser
+version: 1
+risk: medium
+capabilities:
+  - page.read.visibleText
+  - page.script.injectCss
+  - page.script.runJs
+tools:
+  - page.read
+  - page.script
+scripts:
+  - styles/immersive-reading.css
+  - scripts/paragraph-notes.js
+---
+
+Use this skill when the user asks for paragraph annotations, reading notes, quick understanding, chart explanation, 段落标注, 段落注释, 阅读注释, or 快速理解. Use the browser/system language unless the user asks for another language.
+Return a browserToolPlan that reads visible text, injects immersive CSS, then runs the notes script with paragraph notes generated by the model:
+{"calls":[{"toolId":"page.read","input":{"mode":"visibleText"}},{"toolId":"page.script","input":{"language":"css","scriptId":"styles/immersive-reading.css"}},{"toolId":"page.script","input":{"language":"js","scriptId":"scripts/paragraph-notes.js","generate":"generateParagraphNotes","targetLanguage":"system","maxParagraphs":12,"batchSize":3}}]}`,
   skillCreator: `---
 name: skill-creator
 description: Create or update a concise standard SKILL.md when the user wants BrowserAgent to remember a reusable workflow as a skill.
@@ -57,21 +161,110 @@ Create a concise standard SKILL.md:
 Action protocol: return {"action":{"type":"skill","skillId":"builtin/skill-creator","input":{"skillMarkdown":"---\\nname: concise-name\\ndescription: When to use this skill.\\n---\\n\\n# Concise title\\n\\nEssential workflow steps."}},"reason":"...","confidence":0.9}.`
 } as const;
 
+const builtInScriptAssets = {
+  markPage: {
+    "styles/mark-page.css": [
+      ".agenticify-marked-section { outline: 2px solid #2563eb; outline-offset: 3px; background: rgba(37, 99, 235, 0.08); border-radius: 6px; }",
+      ".agenticify-marked-heading { box-shadow: inset 4px 0 0 #2563eb; padding-left: 8px; background: rgba(37, 99, 235, 0.08); }",
+      ".agenticify-marked-media { outline: 2px solid #d97706; outline-offset: 3px; border-radius: 6px; }",
+      ".agenticify-marked-table { outline: 2px solid #7c3aed; outline-offset: 3px; border-radius: 6px; }",
+      ".agenticify-marked-control {",
+      "  outline: 2px dashed #16a34a;",
+      "  outline-offset: 2px;",
+      "}"
+    ].join("\n"),
+    "scripts/mark-page.js": [
+      "const main = document.querySelector('article,main,[role=\"main\"]') || document.body;",
+      "const headings = Array.from(main.querySelectorAll('h1,h2,h3')).filter((el) => (el.textContent || '').trim().length > 3).slice(0, 20);",
+      "const sections = Array.from(main.querySelectorAll('section,article,[data-testid*=\"article\"],.article,.post,.content')).filter((el) => el.getBoundingClientRect().height > 120).slice(0, 12);",
+      "const media = Array.from(main.querySelectorAll('figure,img,video,canvas,svg')).filter((el) => el.getBoundingClientRect().width > 80 && el.getBoundingClientRect().height > 60).slice(0, 20);",
+      "const tables = Array.from(main.querySelectorAll('table,[role=\"table\"]')).slice(0, 10);",
+      "const controls = Array.from(main.querySelectorAll('button,a,input,textarea,select,[role=\"button\"]')).filter((el) => (el.textContent || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim()).slice(0, 30);",
+      "headings.forEach((element) => element.classList.add('agenticify-marked-heading'));",
+      "sections.forEach((element) => element.classList.add('agenticify-marked-section'));",
+      "media.forEach((element) => element.classList.add('agenticify-marked-media'));",
+      "tables.forEach((element) => element.classList.add('agenticify-marked-table'));",
+      "controls.forEach((element) => element.classList.add('agenticify-marked-control'));",
+      "return { changed: headings.length + sections.length + media.length + tables.length + controls.length, headings: headings.length, sections: sections.length, media: media.length, tables: tables.length, controls: controls.length };"
+    ].join("\n")
+  },
+  immersiveReading: {
+    "styles/immersive-reading.css": [
+      ".agenticify-immersive-block { box-sizing: border-box; margin: 0.45em 0 1em; color: color-mix(in srgb, currentColor 76%, transparent); font-size: 0.94em; line-height: inherit; }",
+      ".agenticify-translation { padding: 0.45em 0 0.1em; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); font-style: normal; }",
+      ".agenticify-note { margin-top: 0.6em; padding: 0.68em 0.85em; border-left: 3px solid color-mix(in srgb, currentColor 36%, transparent); border-radius: 7px; background: color-mix(in srgb, currentColor 7%, transparent); color: color-mix(in srgb, currentColor 84%, transparent); }",
+      ".agenticify-note-label { display: inline-block; margin: 0 0.45em 0.15em 0; padding: 0.1em 0.45em; border-radius: 999px; background: color-mix(in srgb, currentColor 10%, transparent); color: color-mix(in srgb, currentColor 78%, transparent); font-size: 0.78em; font-weight: 700; letter-spacing: 0; vertical-align: baseline; }"
+    ].join("\n"),
+    "scripts/immersive-translate.js": [
+      "const items = Array.isArray(data && data.items) ? data.items : [];",
+      "const label = String((data && data.label) || 'Note');",
+      "const paragraphs = Array.from(document.querySelectorAll('[data-agenticify-paragraph-index]'));",
+      "let changed = 0;",
+      "for (const item of items) {",
+      "  const target = paragraphs.find((element) => element.getAttribute('data-agenticify-paragraph-index') === String(item.index));",
+      "  if (!target || !item.text) continue;",
+      "  target.parentElement && target.parentElement.querySelectorAll(`.agenticify-translation[data-agenticify-for=\"${item.index}\"]`).forEach((node) => node.remove());",
+      "  const block = document.createElement('div');",
+      "  block.className = 'agenticify-immersive-block agenticify-translation';",
+      "  block.dataset.agenticifyFor = String(item.index);",
+      "  block.textContent = String(item.text);",
+      "  target.insertAdjacentElement('afterend', block);",
+      "  changed += 1;",
+      "}",
+      "return { changed };"
+    ].join("\n"),
+    "scripts/paragraph-notes.js": [
+      "const items = Array.isArray(data && data.items) ? data.items : [];",
+      "const paragraphs = Array.from(document.querySelectorAll('[data-agenticify-paragraph-index]'));",
+      "let changed = 0;",
+      "for (const item of items) {",
+      "  const target = paragraphs.find((element) => element.getAttribute('data-agenticify-paragraph-index') === String(item.index));",
+      "  if (!target || !item.text) continue;",
+      "  target.parentElement && target.parentElement.querySelectorAll(`.agenticify-note[data-agenticify-for=\"${item.index}\"]`).forEach((node) => node.remove());",
+      "  const block = document.createElement('div');",
+      "  block.className = 'agenticify-immersive-block agenticify-note';",
+      "  block.dataset.agenticifyFor = String(item.index);",
+      "  const safeLabel = label.replace(/[&<>]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[char]));",
+      "  const safeText = String(item.text).replace(/[&<>]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[char]));",
+      "  block.innerHTML = `<span class=\"agenticify-note-label\">${safeLabel}</span>${safeText}`;",
+      "  target.insertAdjacentElement('afterend', block);",
+      "  changed += 1;",
+      "}",
+      "return { changed };"
+    ].join("\n")
+  }
+} as const;
+
 function slugify(value: string): string {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "skill";
 }
 
-function parseFrontmatter(markdown: string): Record<string, string> {
+function parseFrontmatter(markdown: string): Record<string, string | string[]> {
   const match = /^---\s*\n([\s\S]*?)\n---\s*/.exec(markdown);
   if (!match) return {};
 
-  return Object.fromEntries(
-    match[1]
-      .split("\n")
-      .map((line) => line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/))
-      .filter((entry): entry is RegExpMatchArray => Boolean(entry))
-      .map((entry) => [entry[1], entry[2].replace(/^["']|["']$/g, "").trim()])
-  );
+  const result: Record<string, string | string[]> = {};
+  let listKey = "";
+  for (const line of match[1].split("\n")) {
+    const listItem = line.match(/^\s*-\s+(.+)$/);
+    if (listItem && listKey) {
+      const current = result[listKey];
+      result[listKey] = [...(Array.isArray(current) ? current : []), listItem[1].trim()];
+      continue;
+    }
+
+    const entry = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!entry) continue;
+    listKey = "";
+    const value = entry[2].replace(/^["']|["']$/g, "").trim();
+    if (!value) {
+      listKey = entry[1];
+      result[listKey] = [];
+    } else {
+      result[entry[1]] = value;
+    }
+  }
+  return result;
 }
 
 function bodyText(markdown: string): string {
@@ -80,12 +273,15 @@ function bodyText(markdown: string): string {
 
 export function parseSkillMarkdown(markdown: string, options: ParseOptions = {}): InstalledSkill {
   const frontmatter = parseFrontmatter(markdown);
-  const name = frontmatter.name?.trim();
-  const description = frontmatter.description?.trim();
+  const name = typeof frontmatter.name === "string" ? frontmatter.name.trim() : "";
+  const description = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
   if (!name || !description) {
     throw new Error("SKILL.md must include frontmatter name and description.");
   }
   const now = options.now ?? new Date().toISOString();
+  const runtime = frontmatter.runtime === "browser" ? "browser" : frontmatter.runtime === "prompt" ? "prompt" : undefined;
+  const risk = frontmatter.risk === "low" || frontmatter.risk === "medium" || frontmatter.risk === "high" ? frontmatter.risk : undefined;
+  const version = typeof frontmatter.version === "string" && Number.isFinite(Number(frontmatter.version)) ? Number(frontmatter.version) : undefined;
   return {
     id: slugify(name),
     name,
@@ -93,6 +289,12 @@ export function parseSkillMarkdown(markdown: string, options: ParseOptions = {})
     skillMarkdown: markdown,
     enabled: true,
     source: options.source ?? (options.sourceUrl?.startsWith("https://skills.sh/") ? "skills.sh" : "manual"),
+    runtime,
+    version,
+    risk,
+    capabilities: Array.isArray(frontmatter.capabilities) ? frontmatter.capabilities : undefined,
+    tools: Array.isArray(frontmatter.tools) ? frontmatter.tools : undefined,
+    scripts: Array.isArray(frontmatter.scripts) ? frontmatter.scripts : undefined,
     sourceUrl: options.sourceUrl,
     installedAt: now,
     updatedAt: now
@@ -104,6 +306,9 @@ export const builtInSkills: InstalledSkill[] = [
   { ...parseSkillMarkdown(builtInSkillMarkdown.pageReport, { source: "builtin", now: "builtin" }), id: "builtin/page-report" },
   { ...parseSkillMarkdown(builtInSkillMarkdown.rewritePage, { source: "builtin", now: "builtin" }), id: "builtin/rewrite-page" },
   { ...parseSkillMarkdown(builtInSkillMarkdown.fillForm, { source: "builtin", now: "builtin" }), id: "builtin/fill-form" },
+  { ...parseSkillMarkdown(builtInSkillMarkdown.markPage, { source: "builtin", now: "builtin" }), id: "builtin/mark-page", scriptAssets: builtInScriptAssets.markPage },
+  { ...parseSkillMarkdown(builtInSkillMarkdown.immersiveTranslate, { source: "builtin", now: "builtin" }), id: "builtin/immersive-translate", scriptAssets: builtInScriptAssets.immersiveReading },
+  { ...parseSkillMarkdown(builtInSkillMarkdown.paragraphNotes, { source: "builtin", now: "builtin" }), id: "builtin/paragraph-notes", scriptAssets: builtInScriptAssets.immersiveReading },
   { ...parseSkillMarkdown(builtInSkillMarkdown.skillCreator, { source: "builtin", now: "builtin" }), id: "builtin/skill-creator" }
 ];
 
@@ -134,7 +339,18 @@ export async function installSkillFromUrl(url: string, fetchImpl: typeof fetch =
 }
 
 export function matchSkillsForTask(task: string, skills: InstalledSkill[], limit = 4): InstalledSkill[] {
-  const tokens = new Set(task.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter((token) => token.length >= 2));
+  const baseTokens = task.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter((token) => token.length >= 2);
+  const cjkTokens = baseTokens.flatMap((token) => {
+    const chars = token.match(/[\u4e00-\u9fff]+/g) ?? [];
+    return chars.flatMap((chunk) => {
+      const grams: string[] = [];
+      for (let size = 2; size <= Math.min(6, chunk.length); size += 1) {
+        for (let index = 0; index <= chunk.length - size; index += 1) grams.push(chunk.slice(index, index + size));
+      }
+      return grams;
+    });
+  });
+  const tokens = new Set([...baseTokens, ...cjkTokens]);
   return skills
     .filter((skill) => skill.enabled)
     .map((skill) => {
@@ -150,28 +366,24 @@ export function matchSkillsForTask(task: string, skills: InstalledSkill[], limit
 
 export function buildSkillPrompt(skills: InstalledSkill[]): string {
   if (!skills.length) return "";
+  const hasBrowserSkill = skills.some((skill) => skill.runtime === "browser");
   return [
     "Available installed skills:",
+    hasBrowserSkill
+      ? "For browser runtime skills, call action {\"type\":\"skill\",\"skillId\":\"...\",\"input\":{\"browserToolPlan\":{\"calls\":[...]}}} using only tools declared by that skill."
+      : "",
     ...skills.map((skill) => [
       `Skill: ${skill.id}`,
       `Name: ${skill.name}`,
       `Description: ${skill.description}`,
+      skill.runtime ? `Runtime: ${skill.runtime}` : "",
+      skill.risk ? `Risk: ${skill.risk}` : "",
+      skill.tools?.length ? `Tools: ${skill.tools.join(", ")}` : "",
+      skill.capabilities?.length ? `Capabilities: ${skill.capabilities.join(", ")}` : "",
+      skill.scripts?.length ? `Scripts: ${skill.scripts.join(", ")}` : "",
       skill.skillMarkdown
-    ].join("\n"))
+    ].filter(Boolean).join("\n"))
   ].join("\n\n");
-}
-
-function actionInstruction(action: AgentSkillAction): string {
-  const value = action.input?.instruction;
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-export function skillActionToBenchmarkRequest(action: AgentSkillAction): BenchmarkToolRequest | undefined {
-  if (action.skillId === "builtin/screenshot") return { type: "screenshot" };
-  if (action.skillId === "builtin/page-report") return { type: "report" };
-  if (action.skillId === "builtin/rewrite-page") return { type: "rewrite", instruction: actionInstruction(action) };
-  if (action.skillId === "builtin/fill-form") return { type: "fill-form", instruction: actionInstruction(action) };
-  return undefined;
 }
 
 export function mergeSkills(installed: InstalledSkill[]): InstalledSkill[] {

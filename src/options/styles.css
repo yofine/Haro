@@ -687,6 +687,159 @@ h2 {
   gap: 12px;
 }
 
+.local-model-panel {
+  margin-top: 18px;
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.local-model-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+}
+
+.local-model-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.local-model-warning {
+  margin-top: 14px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  background: #fff7ed;
+  padding: 12px;
+}
+
+.local-model-warning strong {
+  color: #9a3412;
+  font-size: 13px;
+}
+
+.local-model-warning span {
+  color: #7c2d12;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.local-model-use-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.local-model-use {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.local-model-use strong,
+.local-model-use span {
+  display: block;
+}
+
+.local-model-use strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.local-model-use span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.local-model-list {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.local-model-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.local-model-card-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.local-purpose-list {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.local-purpose-row {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.local-purpose-row strong,
+.local-purpose-row small {
+  display: block;
+}
+
+.local-purpose-row strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.local-purpose-row small {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.local-model-empty {
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 18px;
+}
+
+.local-model-empty p {
+  margin: 8px 0 14px;
+}
+
+.privacy-policy-panel {
+  margin-top: 16px;
+  border-top: 1px solid #eef2f7;
+  padding-top: 16px;
+}
+
+.privacy-policy-panel p {
+  margin-top: 6px;
+}
+
 .gateway-toggle-card {
   margin-top: 18px;
   border: 1px solid #d7dce3;
@@ -773,6 +926,22 @@ h2 {
   border-radius: 12px;
   background: #ffffff;
   padding: 14px;
+}
+
+.gateway-local-status {
+  margin-top: 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.gateway-local-status p {
+  margin-top: 6px;
 }
 
 .example-tabs {
@@ -1026,6 +1195,51 @@ h2 {
   flex-wrap: wrap;
 }
 
+.skill-content {
+  margin-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 10px;
+}
+
+.skill-content summary {
+  cursor: pointer;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.skill-content pre {
+  margin-top: 10px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 12px;
+  color: #0f172a;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.skill-script-assets {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.skill-script-title {
+  color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.skill-script-asset pre {
+  margin-top: 6px;
+}
+
 .setting-row {
   margin-top: 18px;
   display: grid;
@@ -1148,6 +1362,9 @@ h2 {
   .provider-header,
   .provider-grid,
   .gateway-toggle-card,
+  .gateway-local-status,
+  .local-model-heading,
+  .local-model-card-top,
   .memory-compose-panel,
   .memory-card,
   .default-panel {
@@ -1155,7 +1372,9 @@ h2 {
   }
 
   .memory-overview,
-  .memory-meta-grid {
+  .memory-meta-grid,
+  .local-model-use-grid,
+  .local-purpose-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1166,7 +1385,9 @@ h2 {
 
 @media (max-width: 620px) {
   .memory-overview,
-  .memory-meta-grid {
+  .memory-meta-grid,
+  .local-model-use-grid,
+  .local-purpose-list {
     grid-template-columns: 1fr;
   }
 

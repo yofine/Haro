@@ -1,4 +1,15 @@
-import type { ExtensionSettings, Locale, ProviderSettings } from "./types";
+import type {
+  ExtensionSettings,
+  Locale,
+  LocalModelCacheBackend,
+  LocalModelLoadState,
+  LocalModelPrivacySettings,
+  LocalModelProfile,
+  LocalModelPurpose,
+  LocalModelSettings,
+  PrivacyPolicyMode,
+  ProviderSettings
+} from "./types";
 import { normalizeMemories } from "./memories";
 
 function getBrowserLanguage(): string {
@@ -18,6 +29,18 @@ export const defaultSettings: ExtensionSettings = {
   defaultProviderId: undefined,
   defaultModel: undefined,
   gateway: { enabled: true },
+  localModels: {
+    enabled: false,
+    defaultProfileId: undefined,
+    profiles: [],
+    privacy: {
+      mode: "redact",
+      scanPageText: true,
+      scanSelectedText: true,
+      scanFormValues: false,
+      blockHighConfidenceSecrets: true
+    }
+  },
   skills: [],
   memories: [],
   permissions: [],
@@ -62,6 +85,85 @@ function ensureProvider(provider: Partial<ProviderSettings>, index: number): Pro
   };
 }
 
+const validLocalPurposes: LocalModelPurpose[] = ["intent", "privacy", "simple-chat", "agent-policy"];
+const validLocalLoadStates: LocalModelLoadState[] = ["not-loaded", "loading", "ready", "failed"];
+const validCacheBackends: LocalModelCacheBackend[] = ["cache", "indexeddb"];
+const validPrivacyModes: PrivacyPolicyMode[] = ["off", "redact", "block", "ask"];
+
+function normalizeLocalPurposes(value: unknown, fallback: LocalModelPurpose[]): LocalModelPurpose[] {
+  if (!Array.isArray(value)) return fallback;
+  const normalized = [...new Set(value.filter((purpose): purpose is LocalModelPurpose => validLocalPurposes.includes(purpose as LocalModelPurpose)))];
+  return normalized.length ? normalized : fallback;
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(value, min), max) : fallback;
+}
+
+function normalizePositiveNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.max(value, min), max) : fallback;
+}
+
+function normalizeLocalProfile(input: Partial<LocalModelProfile>, index: number): LocalModelProfile | undefined {
+  const modelId = input.modelId?.trim();
+  if (!modelId) return undefined;
+
+  const purposes = normalizeLocalPurposes(input.purposes, ["intent", "privacy"]);
+  const defaultForPurposes = normalizeLocalPurposes(input.defaultForPurposes, purposes)
+    .filter((purpose) => purposes.includes(purpose));
+  const loadState = validLocalLoadStates.includes(input.loadState as LocalModelLoadState) ? input.loadState as LocalModelLoadState : "not-loaded";
+  const isReady = loadState === "ready";
+  const now = new Date().toISOString();
+
+  return {
+    id: input.id?.trim() || `local-model-${index + 1}`,
+    name: input.name?.trim() || modelId,
+    runtime: "webllm",
+    modelId,
+    enabled: Boolean(input.enabled) && isReady,
+    loadState,
+    purposes,
+    defaultForPurposes,
+    cacheBackend: validCacheBackends.includes(input.cacheBackend as LocalModelCacheBackend) ? input.cacheBackend as LocalModelCacheBackend : "indexeddb",
+    temperature: clampNumber(input.temperature, 0, 0, 1),
+    maxTokens: Math.round(normalizePositiveNumber(input.maxTokens, 256, 16, 2048)),
+    contextWindowHint: typeof input.contextWindowHint === "number" && input.contextWindowHint > 0 ? Math.round(input.contextWindowHint) : undefined,
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || now,
+    lastLoadedAt: input.lastLoadedAt,
+    lastError: input.lastError
+  };
+}
+
+function normalizePrivacySettings(input: Partial<LocalModelPrivacySettings> | undefined): LocalModelPrivacySettings {
+  return {
+    ...defaultSettings.localModels.privacy,
+    ...input,
+    mode: validPrivacyModes.includes(input?.mode as PrivacyPolicyMode) ? input?.mode as PrivacyPolicyMode : defaultSettings.localModels.privacy.mode,
+    scanPageText: input?.scanPageText ?? defaultSettings.localModels.privacy.scanPageText,
+    scanSelectedText: input?.scanSelectedText ?? defaultSettings.localModels.privacy.scanSelectedText,
+    scanFormValues: input?.scanFormValues ?? defaultSettings.localModels.privacy.scanFormValues,
+    blockHighConfidenceSecrets: input?.blockHighConfidenceSecrets ?? defaultSettings.localModels.privacy.blockHighConfidenceSecrets
+  };
+}
+
+function normalizeLocalModels(input: Partial<LocalModelSettings> | undefined): LocalModelSettings {
+  const profiles = (input?.profiles ?? [])
+    .map(normalizeLocalProfile)
+    .filter((profile): profile is LocalModelProfile => Boolean(profile));
+  const defaultProfile = profiles.find((profile) => profile.id === input?.defaultProfileId)
+    ?? profiles.find((profile) => profile.enabled)
+    ?? profiles[0];
+  const hasReadyEnabledProfile = Boolean(defaultProfile?.enabled && defaultProfile.loadState === "ready");
+
+  return {
+    enabled: Boolean(input?.enabled) && hasReadyEnabledProfile,
+    defaultProfileId: defaultProfile?.id,
+    profiles,
+    privacy: normalizePrivacySettings(input?.privacy)
+  };
+}
+
 export function normalizeSettings(input: Partial<ExtensionSettings>): ExtensionSettings {
   const providers = (input.providers ?? [])
     .filter((provider) => {
@@ -79,6 +181,7 @@ export function normalizeSettings(input: Partial<ExtensionSettings>): ExtensionS
     ...input,
     locale: input.locale === "zh" || input.locale === "en" ? input.locale : getDefaultLocale(),
     providers,
+    localModels: normalizeLocalModels(input.localModels),
     skills: Array.isArray(input.skills) ? input.skills.filter((skill) => (
       skill
       && typeof skill.id === "string"

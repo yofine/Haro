@@ -46,7 +46,7 @@ type ModelDecision = {
   thought?: string;
   plan?: string;
   action?: AgentAction;
-  final?: string;
+  final?: unknown;
   reason?: string;
   confidence?: number;
 };
@@ -103,13 +103,91 @@ function extractJsonObject(text: string): string | undefined {
   return undefined;
 }
 
+function titleizeKey(key: string): string {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (char) => char.toUpperCase());
+}
+
+function humanizeValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const text = humanizeValue(item);
+      return text.includes("\n") ? `- ${text.replace(/\n/g, "\n  ")}` : `- ${text}`;
+    }).join("\n");
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && entryValue !== "")
+      .map(([key, entryValue]) => {
+        const text = humanizeValue(entryValue);
+        if (!text.trim()) return "";
+        return `### ${titleizeKey(key)}\n${text}`;
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  return "";
+}
+
+function normalizeFinalText(value: unknown, fallbackText: string): string | undefined {
+  if (typeof value === "string") return value;
+  if (value === true) return undefined;
+  const text = humanizeValue(value);
+  return text.trim() ? text : fallbackText;
+}
+
+function normalizeSkillId(value: string): string {
+  const skillId = value.trim().replace(/^["']|["']$/g, "");
+  if (/^(builtin|manual|custom)\//.test(skillId)) return skillId;
+  return `builtin/${skillId}`;
+}
+
+function normalizeActionValue(value: unknown): AgentAction | undefined {
+  if (value && typeof value === "object") {
+    const action = value as Record<string, unknown>;
+    if (typeof action.type === "string" && action.type === "skill" && typeof action.skillId === "string") {
+      return { ...(action as unknown as AgentAction), skillId: normalizeSkillId(action.skillId) } as AgentAction;
+    }
+    if (typeof action.type === "string") {
+      const nested = normalizeActionValue(action.type);
+      if (nested) return nested;
+    }
+    return action as unknown as AgentAction;
+  }
+
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  if (!/\bskill\b/i.test(text)) return undefined;
+  const explicit = text.match(/skillId\s*[:=/]\s*([A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?)/i)
+    ?? text.match(/\bskill\s*[:=/]\s*([A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?)/i);
+  if (!explicit) return undefined;
+  return { type: "skill", skillId: normalizeSkillId(explicit[1]) };
+}
+
 function normalizeDecision(value: unknown, fallbackText: string): ModelDecision {
   if (!value || typeof value !== "object") return { final: fallbackText };
-  const decision = value as ModelDecision;
-  const hasFinal = typeof decision.final === "string";
-  const hasAction = Boolean(decision.action && typeof decision.action === "object");
+  const decision = { ...(value as ModelDecision) };
+  const normalizedAction = normalizeActionValue(decision.action);
+  if (normalizedAction) decision.action = normalizedAction;
+  const hasFinalProperty = Object.prototype.hasOwnProperty.call(decision, "final");
+  const finalText = hasFinalProperty ? normalizeFinalText(decision.final, fallbackText) : undefined;
+  const hasFinal = Boolean(finalText);
+  const hasBooleanFinal = (decision as { final?: unknown }).final === true;
+  const hasAction = Boolean(normalizedAction);
+  if (hasBooleanFinal) {
+    return {
+      ...decision,
+      final: typeof decision.reason === "string" && decision.reason.trim() ? decision.reason : fallbackText
+    };
+  }
   if (!hasFinal && !hasAction) return { final: fallbackText };
-  return decision;
+  return finalText ? { ...decision, final: finalText } : decision;
 }
 
 function parseDecision(text: string): ModelDecision {
@@ -168,6 +246,12 @@ function selectSkillsForTask(task: string, skills: InstalledSkill[], skillIds?: 
   if (!selectedIds.length) return matchSkillsForTask(task, skills);
   const selected = new Set(selectedIds);
   return skills.filter((skill) => skill.enabled && selected.has(skill.id));
+}
+
+function isDirectSkillRunRequest(task: string, skillIds: string[] | undefined, matchedSkills: InstalledSkill[]): boolean {
+  if (matchedSkills.length !== 1 || matchedSkills[0].runtime !== "browser") return false;
+  if (skillIds?.filter(Boolean).length) return true;
+  return /\b(use|run|execute|apply|invoke)\b/i.test(task) || /(使用|执行|运行|调用|应用|启动|开启)/.test(task);
 }
 
 function describeMemory(memory: ConversationMemory | undefined): string {
@@ -250,10 +334,41 @@ export async function runAgentTask({
   const steps = Math.min(Math.max(maxSteps, 1), MAX_STEPS);
   const events: AgentEvent[] = [];
   const matchedSkills = selectSkillsForTask(task, skills, skillIds);
+  const directSkill = isDirectSkillRunRequest(task, skillIds, matchedSkills) ? matchedSkills[0] : undefined;
 
   for (let step = 0; step < steps; step += 1) {
     const observation = await observe();
     events.push({ type: "observe", observation });
+
+    if (directSkill) {
+      const action: AgentAction = { type: "skill", skillId: directSkill.id };
+      if (!act) {
+        const finalText = "No page action tool is available for this run.";
+        events.push({ type: "blocked", reason: finalText, status: "blocked" });
+        return { finalText, events };
+      }
+      events.push({
+        type: "thought",
+        text: `Use selected browser skill ${directSkill.id}.`,
+        confidence: 1
+      });
+      events.push({
+        type: "action",
+        action,
+        reason: `Run browser skill ${directSkill.id}.`,
+        confidence: 1
+      });
+      const result = await act(action);
+      events.push({ type: "action-result", action, result });
+      if (result.events?.length) events.push(...result.events);
+      const finalText = result.ok ? result.message : result.message;
+      if (!result.ok) {
+        events.push({ type: "blocked", reason: finalText, status: result.status === "needs_confirmation" ? "needs_confirmation" : "blocked" });
+        return { finalText, events };
+      }
+      events.push({ type: "final", text: finalText });
+      return { finalText, events };
+    }
 
     const response = await modelGateway.chat(buildMessages(task, observation, events, steps, mode, matchedSkills, memory));
     const decision = parseDecision(response.text);
@@ -264,7 +379,7 @@ export async function runAgentTask({
     });
 
     if (decision.final || !decision.action) {
-      const finalText = decision.final ?? response.text;
+      const finalText = typeof decision.final === "string" ? decision.final : response.text;
       events.push({ type: "final", text: finalText });
       return { finalText, events };
     }
@@ -289,10 +404,17 @@ export async function runAgentTask({
     });
     const result = await act(decision.action);
     events.push({ type: "action-result", action: decision.action, result });
+    if (result.events?.length) events.push(...result.events);
 
     if (!result.ok) {
       events.push({ type: "blocked", reason: result.message, status: result.status === "needs_confirmation" ? "needs_confirmation" : "blocked" });
       return { finalText: result.message, events };
+    }
+
+    if (decision.action.type === "skill") {
+      const finalText = result.message;
+      events.push({ type: "final", text: finalText });
+      return { finalText, events };
     }
   }
 

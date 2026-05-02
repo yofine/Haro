@@ -1,8 +1,20 @@
 import { classifyTaskIntent, runAgentTask, runMemoryChat, runPageChat } from "../agent/runtime";
-import { builtInSkills, installSkillFromUrl, mergeSkills, parseSkillMarkdown, skillActionToBenchmarkRequest } from "../agent/skills";
-import { runBenchmarkTool, sanitizeReportHtml } from "./browserTools";
+import { planBrowserSkillAction } from "../agent/browserSkillRuntime";
+import { builtInSkills, installSkillFromUrl, mergeSkills, parseSkillMarkdown } from "../agent/skills";
+import { runBenchmarkTool, runBrowserToolPlan, sanitizeReportHtml } from "./browserTools";
+import { browserToolPlanNeedsModel } from "../browser-tools/planExecutor";
 import { createDebuggerTools, type DebuggerTarget } from "./debuggerTools";
+import type { BrowserToolPlan } from "../browser-tools/types";
 import { callModel } from "../model-gateway";
+import { createGuardedModelGateway } from "../local-model/policy";
+import {
+  buildLocalClassificationMessages,
+  classifyLocalText,
+  getActiveLocalProfile,
+  getLocalModelStatus,
+  mergeLocalClassification
+} from "../local-model/service";
+import { sendLocalModelHostMessage } from "../local-model/host";
 import { appendCallLog, createCallLog } from "../shared/callLogs";
 import { appendDebugLog, createDebugLog } from "../shared/debugLogs";
 import { createMemory, extractExplicitMemoryContent, getRelevantMemories, parseAutoMemoryResponse } from "../shared/memories";
@@ -30,12 +42,14 @@ import type {
   ConversationMemory,
   AgentAction,
   AgentControlMode,
+  AgentEvent,
   DebuggerAction,
   DebuggerActionResult,
   DomAction,
   DomActionResult,
   DomObservation,
   ExtensionSettings,
+  LocalChatPayload,
   PendingAccessRequest,
   ProviderSettings,
   Scope
@@ -57,6 +71,10 @@ type ResolvedDebuggerTarget = {
   url?: string;
   label: string;
 };
+type BenchmarkToolRun = {
+  result: BenchmarkToolResult;
+  events: AgentEvent[];
+};
 type ExtensionFrameDiagnostic = {
   tagName: string;
   src: string;
@@ -68,6 +86,7 @@ const pendingAccessRequests = new Map<string, {
   request: PendingAccessRequest;
   resolve: PendingAccessResolver;
 }>();
+const AGENT_MODEL_TIMEOUT_MS = 180_000;
 let lastRegularTabId: number | undefined;
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -198,10 +217,16 @@ async function actAgentTab(tab: chrome.tabs.Tab, action: AgentAction): Promise<D
         skillDraft: draft
       };
     }
-    const request = skillActionToBenchmarkRequest(action);
-    if (!request) return { ok: false, status: "failed", message: `Skill ${action.skillId} is not executable.` };
-    const result = await runBenchmarkToolForActiveTab(request, tab.id);
-    return { ok: true, status: "success", message: `Skill ${action.skillId} completed: ${result.title}`, benchmarkResult: result };
+    const planned = planBrowserSkillAction(action, mergeSkills((await getSettings()).skills));
+    if (!planned.ok) return { ok: false, status: planned.status, message: planned.message };
+    const run = await runBrowserToolPlanForActiveTabDetailed(planned.plan, tab.id);
+    return {
+      ok: true,
+      status: "success",
+      message: `Skill ${action.skillId} completed: ${run.result.title}`,
+      benchmarkResult: run.result,
+      events: run.events
+    };
   }
   return actTab(tab, action);
 }
@@ -218,6 +243,17 @@ async function getActiveTab(): Promise<chrome.tabs.Tab> {
     throw new Error("No active regular http/https tab. Select a webpage and try again.");
   }
   return rememberRegularTab(pageTab);
+}
+
+async function getActiveTabSummary(): Promise<{ tabId?: number; title?: string; url?: string; origin?: string }> {
+  const tab = await findActiveRegularTabInNormalWindows();
+  if (!tab?.id || !tab.url || !isHttpUrl(tab.url)) return {};
+  return {
+    tabId: tab.id,
+    title: tab.title,
+    url: tab.url,
+    origin: new URL(tab.url).origin
+  };
 }
 
 async function getTargetTab(tabId?: number): Promise<chrome.tabs.Tab> {
@@ -448,7 +484,11 @@ async function createDebuggerAttachDiagnostics(tab: chrome.tabs.Tab, debuggee?: 
   };
 }
 
-async function runBenchmarkToolForActiveTab(request: BenchmarkToolRequest, tabId?: number): Promise<BenchmarkToolResult> {
+async function runBenchmarkToolForActiveTab(request: BenchmarkToolRequest, tabId?: number, browserToolPlan?: BrowserToolPlan): Promise<BenchmarkToolResult> {
+  return (await runBenchmarkToolForActiveTabDetailed(request, tabId, browserToolPlan)).result;
+}
+
+async function runBenchmarkToolForActiveTabDetailed(request: BenchmarkToolRequest, tabId?: number, browserToolPlan?: BrowserToolPlan): Promise<BenchmarkToolRun> {
   const tab = await assertDebuggerTargetTab(await getTargetTab(tabId));
   if (!tab.id) throw new Error("No active tab");
   const settings = await getSettings();
@@ -461,21 +501,28 @@ async function runBenchmarkToolForActiveTab(request: BenchmarkToolRequest, tabId
   const debuggee = await resolveDebuggerPageTarget(tab);
   const tools = createDebuggerTools(debuggee.target, undefined, debuggee.url, debuggee.label);
   let attached = false;
+  let toolPlan: BrowserToolPlan | undefined = browserToolPlan;
+  const events: AgentEvent[] = [];
   try {
     await tools.attach();
     attached = true;
     const result = await runBenchmarkTool({
       request,
       tools,
-      modelGateway: {
-        chat: (messages) => {
-          if (!provider) throw new Error("This benchmark tool does not use a model.");
-          return callModel({ settings: provider, request: { messages, timeoutMs: 60_000 } });
+      onToolPlan: (plan) => {
+        toolPlan = browserToolPlan ?? plan;
+      },
+      onEvent: (event) => {
+        events.push(event);
+      },
+      modelGateway: provider ? createExternalModelGateway(settings, provider) : {
+        chat: () => {
+          throw new Error("This benchmark tool does not use a model.");
         }
       }
     });
-    await persistDebugLog("Benchmark tool", { origin, tabId: tab.id, request, resultType: result.type, status: "success" });
-    return result;
+    await persistDebugLog("Benchmark tool", { origin, tabId: tab.id, request, toolPlan, events, resultType: result.type, status: "success" });
+    return { result, events };
   } catch (error) {
     const diagnostics = await createDebuggerAttachDiagnostics(tab, debuggee, error);
     const attachError = createDebuggerAttachError(error, diagnostics.suspectedBlockingExtensionTargets);
@@ -483,9 +530,63 @@ async function runBenchmarkToolForActiveTab(request: BenchmarkToolRequest, tabId
       origin,
       tabId: tab.id,
       request,
+      toolPlan,
+      events,
       status: "failed",
       error: attachError.message,
       originalError: error instanceof Error ? error.message : "Unknown benchmark tool error",
+      diagnostics
+    });
+    throw attachError;
+  } finally {
+    if (attached) {
+      await tools.detach().catch(() => undefined);
+    }
+  }
+}
+
+async function runBrowserToolPlanForActiveTabDetailed(plan: BrowserToolPlan, tabId?: number): Promise<BenchmarkToolRun> {
+  const tab = await assertDebuggerTargetTab(await getTargetTab(tabId));
+  if (!tab.id) throw new Error("No active tab");
+  const settings = await getSettings();
+  const origin = requireDebuggerPermission(settings, tab);
+  const provider = browserToolPlanNeedsModel(plan) ? getActiveProvider(settings) : undefined;
+  if (browserToolPlanNeedsModel(plan) && !provider) {
+    throw new Error("Configure an enabled OpenAI or Anthropic provider first.");
+  }
+
+  const debuggee = await resolveDebuggerPageTarget(tab);
+  const tools = createDebuggerTools(debuggee.target, undefined, debuggee.url, debuggee.label);
+  let attached = false;
+  const events: AgentEvent[] = [];
+  try {
+    await tools.attach();
+    attached = true;
+    const result = await runBrowserToolPlan({
+      plan,
+      tools,
+      onEvent: (event) => {
+        events.push(event);
+      },
+      modelGateway: provider ? createExternalModelGateway(settings, provider) : {
+        chat: () => {
+          throw new Error("This browser tool plan does not use a model.");
+        }
+      }
+    });
+    await persistDebugLog("Browser tool plan", { origin, tabId: tab.id, toolPlan: plan, events, resultType: result.type, status: "success" });
+    return { result, events };
+  } catch (error) {
+    const diagnostics = await createDebuggerAttachDiagnostics(tab, debuggee, error);
+    const attachError = createDebuggerAttachError(error, diagnostics.suspectedBlockingExtensionTargets);
+    await persistDebugLog("Browser tool plan", {
+      origin,
+      tabId: tab.id,
+      toolPlan: plan,
+      events,
+      status: "failed",
+      error: attachError.message,
+      originalError: error instanceof Error ? error.message : "Unknown browser tool plan error",
       diagnostics
     });
     throw attachError;
@@ -568,7 +669,7 @@ async function runChat(messages: ChatMessage[], source: "sidebar" | "gateway", o
   const settings = await getSettings();
   const provider = getActiveProvider(settings);
   if (!provider) throw new Error("Configure an enabled OpenAI or Anthropic provider first.");
-  const result = await callModel({ settings: provider, request: { messages, timeoutMs: 60_000 } });
+  const result = await createExternalModelGateway(settings, provider).chat(messages);
   await persistLog(settings, {
     source,
     origin,
@@ -578,6 +679,16 @@ async function runChat(messages: ChatMessage[], source: "sidebar" | "gateway", o
     summary: messages.at(-1)?.content.slice(0, 120)
   }, "Model chat", { origin, provider: provider.provider, model: result.model, usage: result.usage });
   return result;
+}
+
+function createExternalModelGateway(settings: ExtensionSettings, provider: ProviderSettings) {
+  return createGuardedModelGateway({
+    provider,
+    privacy: settings.localModels.privacy,
+    external: {
+      chat: (messages) => callModel({ settings: provider, request: { messages, timeoutMs: AGENT_MODEL_TIMEOUT_MS } })
+    }
+  });
 }
 
 function getRunProvider(settings: ExtensionSettings, providerId?: string, model?: string): ProviderSettings | undefined {
@@ -601,11 +712,13 @@ function enrichConversationMemory(memory: ConversationMemory | undefined, settin
 
 async function persistAutomaticMemories(settings: ExtensionSettings, provider: ProviderSettings, task: string, finalText: string, origin?: string): Promise<ExtensionSettings> {
   if (!finalText.trim()) return settings;
-  const response = await callModel({
-    settings: provider,
-    request: {
-      timeoutMs: 30_000,
-      messages: [
+  const response = await createGuardedModelGateway({
+    provider,
+    privacy: settings.localModels.privacy,
+    external: {
+      chat: (messages) => callModel({ settings: provider, request: { messages, timeoutMs: 30_000 } })
+    }
+  }).chat([
         {
           role: "system",
           content: [
@@ -624,9 +737,7 @@ async function persistAutomaticMemories(settings: ExtensionSettings, provider: P
             `Assistant final answer: ${finalText}`
           ].join("\n\n")
         }
-      ]
-    }
-  }).catch(() => undefined);
+      ]).catch(() => undefined);
   if (!response?.text) return settings;
   const candidates = parseAutoMemoryResponse(response.text, origin);
   if (!candidates.length) return settings;
@@ -641,6 +752,54 @@ async function persistAutomaticMemories(settings: ExtensionSettings, provider: P
   const next = { ...settings, memories: [...fresh, ...settings.memories] };
   await saveSettings(next);
   return next;
+}
+
+async function classifyTaskWithLocalModel(settings: ExtensionSettings, task: string) {
+  const profile = getActiveLocalProfile(settings);
+  if (!settings.localModels.enabled || !profile || !profile.purposes.includes("intent")) {
+    return classifyLocalText(settings, task);
+  }
+
+  try {
+    const response = await sendLocalModelHostMessage({
+      target: "haro-local-model-host",
+      type: "local-model:classify",
+      messages: buildLocalClassificationMessages(task),
+      maxTokens: Math.min(profile.maxTokens || 128, 256),
+      temperature: 0
+    });
+    if (!response.ok) return mergeLocalClassification(settings, task, undefined, response.error);
+    return mergeLocalClassification(settings, task, response.text);
+  } catch (error) {
+    return mergeLocalClassification(
+      settings,
+      task,
+      undefined,
+      error instanceof Error ? error.message : "Local model classification failed; used local rules only."
+    );
+  }
+}
+
+async function runLocalChat(settings: ExtensionSettings, payload: LocalChatPayload) {
+  const profile = getActiveLocalProfile(settings);
+  if (!settings.localModels.enabled || !profile || !profile.purposes.includes("simple-chat")) {
+    throw new GatewayProtocolError("model_not_configured", "No ready local model is enabled for simple chat.");
+  }
+
+  const response = await sendLocalModelHostMessage({
+    target: "haro-local-model-host",
+    type: "local-model:classify",
+    messages: payload.messages,
+    maxTokens: Math.min(payload.maxTokens ?? profile.maxTokens, profile.maxTokens, 1024),
+    temperature: payload.temperature ?? profile.temperature
+  });
+  if (!response.ok) throw new GatewayProtocolError("model_not_configured", response.error);
+
+  return {
+    text: response.text ?? "",
+    model: profile.modelId,
+    usage: undefined
+  };
 }
 
 async function runTask(
@@ -658,7 +817,8 @@ async function runTask(
   const provider = getRunProvider(settings, providerId, model);
   if (!provider) throw new Error("Configure an enabled OpenAI or Anthropic provider first.");
   const selectedSkillIds = normalizeSkillIds(skillIds);
-  const intent = mode === "debugger" || selectedSkillIds.length ? "run" : classifyTaskIntent(task);
+  const localClassification = mode === "debugger" || selectedSkillIds.length ? undefined : await classifyTaskWithLocalModel(settings, task);
+  const intent = mode === "debugger" || selectedSkillIds.length ? "run" : localClassification?.intent ?? classifyTaskIntent(task);
   if (intent === "memory") {
     const explicitMemory = extractExplicitMemoryContent(task);
     const memoryEntry = explicitMemory ? createMemory({ content: explicitMemory, scope: origin ? "site" : "global", origin }) : undefined;
@@ -669,9 +829,7 @@ async function runTask(
     const result = await runMemoryChat({
       task,
       memory: enrichConversationMemory(memory, nextSettings, origin),
-      modelGateway: {
-        chat: (messages) => callModel({ settings: provider, request: { messages, timeoutMs: 60_000 } })
-      }
+      modelGateway: createExternalModelGateway(nextSettings, provider)
     });
     await persistLog(nextSettings, {
       source,
@@ -691,9 +849,7 @@ async function runTask(
       task,
       observation,
       memory: enrichConversationMemory(memory, settings, observation.origin),
-      modelGateway: {
-        chat: (messages) => callModel({ settings: provider, request: { messages, timeoutMs: 60_000 } })
-      }
+      modelGateway: createExternalModelGateway(settings, provider)
     });
     const nextSettings = await persistAutomaticMemories(settings, provider, task, result.finalText, observation.origin);
     await persistLog(nextSettings, {
@@ -715,9 +871,7 @@ async function runTask(
     mode,
     observe,
     act: (action) => actAgentTab(tab, action),
-    modelGateway: {
-      chat: (messages) => callModel({ settings: provider, request: { messages, timeoutMs: 60_000 } })
-    },
+    modelGateway: createExternalModelGateway(settings, provider),
     skills: mergeSkills(settings.skills),
     skillIds: selectedSkillIds,
     memory: enrichConversationMemory(memory, settings, origin ?? tabOriginSafe(tab)),
@@ -769,6 +923,27 @@ function assertRunPayload(payload: unknown): asserts payload is { task: string; 
   }
   if (candidate.mode !== undefined && !["dom", "debugger", "auto"].includes(String(candidate.mode))) {
     throw new GatewayProtocolError("invalid_request", "Invalid run mode.");
+  }
+}
+
+function assertLocalClassifyPayload(payload: unknown): asserts payload is { text: string } {
+  const candidate = payload as { text?: unknown };
+  if (typeof candidate?.text !== "string" || !candidate.text.trim()) {
+    throw new GatewayProtocolError("invalid_request", "Invalid local classify payload.");
+  }
+  if (candidate.text.length > 8000) {
+    throw new GatewayProtocolError("invalid_request", "Local classify payload is too large.");
+  }
+}
+
+function assertLocalChatPayload(payload: unknown): asserts payload is LocalChatPayload {
+  assertChatPayload(payload);
+  const candidate = payload as { maxTokens?: unknown; temperature?: unknown };
+  if (candidate.maxTokens !== undefined && (typeof candidate.maxTokens !== "number" || !Number.isFinite(candidate.maxTokens) || candidate.maxTokens < 1 || candidate.maxTokens > 2048)) {
+    throw new GatewayProtocolError("invalid_request", "Invalid local chat maxTokens.");
+  }
+  if (candidate.temperature !== undefined && (typeof candidate.temperature !== "number" || !Number.isFinite(candidate.temperature) || candidate.temperature < 0 || candidate.temperature > 2)) {
+    throw new GatewayProtocolError("invalid_request", "Invalid local chat temperature.");
   }
 }
 
@@ -886,6 +1061,51 @@ async function revokeSiteAccess(origin: string) {
   return { ok: true };
 }
 
+async function loadLocalModel(profileId: string) {
+  const settings = await getSettings();
+  const profile = settings.localModels.profiles.find((entry) => entry.id === profileId);
+  if (!profile) throw new Error("Local model profile not found.");
+  if (!profile.modelId.trim()) throw new Error("Local model ID is required.");
+
+  const loadingProfile = { ...profile, loadState: "loading" as const, enabled: false, lastError: undefined, updatedAt: new Date().toISOString() };
+  await saveSettings({
+    ...settings,
+    localModels: {
+      ...settings.localModels,
+      enabled: false,
+      profiles: settings.localModels.profiles.map((entry) => entry.id === profile.id ? loadingProfile : entry)
+    }
+  });
+
+  const response = await sendLocalModelHostMessage({
+    target: "haro-local-model-host",
+    type: "local-model:load",
+    profile: loadingProfile
+  });
+
+  const latest = await getSettings();
+  const nextProfile = {
+    ...loadingProfile,
+    loadState: response.ok ? "ready" as const : "failed" as const,
+    enabled: response.ok,
+    lastLoadedAt: response.ok ? new Date().toISOString() : loadingProfile.lastLoadedAt,
+    lastError: response.ok ? undefined : response.error,
+    updatedAt: new Date().toISOString()
+  };
+  const nextSettings = normalizeSettings({
+    ...latest,
+    localModels: {
+      ...latest.localModels,
+      enabled: response.ok,
+      defaultProfileId: nextProfile.id,
+      profiles: latest.localModels.profiles.map((entry) => entry.id === nextProfile.id ? nextProfile : entry)
+    }
+  });
+  await saveSettings(nextSettings);
+  if (!response.ok) throw new Error(response.error);
+  return nextSettings.localModels.profiles.find((entry) => entry.id === nextProfile.id);
+}
+
 async function installSkill(url: string) {
   const settings = await getSettings();
   const skill = await installSkillFromUrl(url);
@@ -990,6 +1210,22 @@ async function handleGatewayRequest(message: BrowserAgentRequest & { origin?: st
       return createGatewaySuccess(requestId, { models: listGatewayModels(settings) });
     }
 
+    if (message.method === "local.status") {
+      return createGatewaySuccess(requestId, getLocalModelStatus(settings));
+    }
+
+    if (message.method === "local.classify") {
+      assertLocalClassifyPayload(message.payload);
+      ensureGatewayAccess(settings, message.origin, ["model.chat"], false);
+      return createGatewaySuccess(requestId, await classifyTaskWithLocalModel(settings, message.payload.text));
+    }
+
+    if (message.method === "local.chat") {
+      assertLocalChatPayload(message.payload);
+      ensureGatewayAccess(settings, message.origin, ["model.chat"], false);
+      return createGatewaySuccess(requestId, await runLocalChat(settings, message.payload));
+    }
+
     if (message.method === "chat") {
       assertChatPayload(message.payload);
       await authorizeGateway(message.origin, ["model.chat"], false);
@@ -1037,11 +1273,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       return { ok: true, text: result.text, model: result.model, provider: result.provider };
     }
+    if (message.type === "agenticify:local-model-load") {
+      return loadLocalModel(String(message.profileId || ""));
+    }
     if (message.type === "agenticify:observe-active-tab") {
       const tab = await getActiveTab();
       const observation = await observeTab(tab);
       return { ...observation, tabId: tab.id };
     }
+    if (message.type === "agenticify:get-active-tab-summary") return getActiveTabSummary();
     if (message.type === "agenticify:sidebar-chat") return runChat(message.messages, "sidebar");
     if (message.type === "agenticify:sidebar-run") {
       return runTask(message.task, "sidebar", undefined, message.mode ?? "dom", message.providerId, message.model, message.tabId, message.memory, message.skillIds);

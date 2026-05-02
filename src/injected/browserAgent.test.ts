@@ -44,6 +44,37 @@ describe("window.browserAgent v1 requests", () => {
     }, "*");
   });
 
+  it("posts local model status, classify, and chat requests", () => {
+    void window.browserAgent?.local.status();
+    void window.browserAgent?.local.classify({ text: "Summarize this page" });
+    void window.browserAgent?.local.chat({ messages: [{ role: "user", content: "Answer locally" }], maxTokens: 64 });
+
+    expect(window.postMessage).toHaveBeenNthCalledWith(1, {
+      id: "00000000-0000-4000-8000-000000000123",
+      requestId: "00000000-0000-4000-8000-000000000123",
+      source: "agenticify-page",
+      version: "1",
+      method: "local.status",
+      payload: undefined
+    }, "*");
+    expect(window.postMessage).toHaveBeenNthCalledWith(2, {
+      id: "00000000-0000-4000-8000-000000000123",
+      requestId: "00000000-0000-4000-8000-000000000123",
+      source: "agenticify-page",
+      version: "1",
+      method: "local.classify",
+      payload: { text: "Summarize this page" }
+    }, "*");
+    expect(window.postMessage).toHaveBeenNthCalledWith(3, {
+      id: "00000000-0000-4000-8000-000000000123",
+      requestId: "00000000-0000-4000-8000-000000000123",
+      source: "agenticify-page",
+      version: "1",
+      method: "local.chat",
+      payload: { messages: [{ role: "user", content: "Answer locally" }], maxTokens: 64 }
+    }, "*");
+  });
+
   it("resolves structured gateway responses without throwing on protocol errors", async () => {
     const promise = window.browserAgent?.getStatus();
     const response: BrowserAgentResponse = {

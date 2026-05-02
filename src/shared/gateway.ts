@@ -66,6 +66,9 @@ export function normalizeGatewayError(error: unknown): { code: GatewayErrorCode;
     if (/debugger mode requires explicit|debugger command|could not attach debugger|could not detach debugger|chrome debugger api is unavailable/i.test(error.message)) {
       return { code: "debugger_control_unavailable", message: error.message };
     }
+    if (/privacy policy|privacy blocked|blocked by local privacy/i.test(error.message)) {
+      return { code: "privacy_blocked", message: "External model call was blocked by the local privacy policy." };
+    }
     return { code: "internal_error", message: error.message };
   }
 
